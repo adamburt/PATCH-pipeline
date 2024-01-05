@@ -6,7 +6,6 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem-per-cpu=20000
 #SBATCH --output=blastn_2021.out.%j
-# Test
 
 #WGS-unmapped-reads-pipeline
 sample=$(printf '%q\n' "${PWD##*/}")
