@@ -51,7 +51,7 @@ mkdir fastqc
 fastqc  *_F1.fq.gz --outdir fastqc
 fastqc  *_F2.fq.gz --outdir fastqc
 
-:'
+
 for fastq in *_F1.fq.gz 
 do
         base=${fastq%%_F1.fq.gz}
