@@ -8,24 +8,26 @@
 #SBATCH --output=blastn_2021.out.%j
 
 #WGS-unmapped-reads-pipeline
+echo Loading modules...
 sample=$(printf '%q\n' "${PWD##*/}")
-module load bwa/0.7.17-gcc-9.4.0 
-module load bedtools2/2.23.0-gcc-9.4.0
-module load samtools/1.13-gcc-9.4.0-python-3.8.12
-module load openjdk/1.8.0_265-b01-gcc-9.4.0
-module load trimmomatic/0.39-gcc-9.4.0
-module load fastqc/0.11.9-gcc-10.3.0
+module load bwa/0.7.17-gcc-9.4.0 > /dev/null 2>&1
+module load bedtools2/2.23.0-gcc-9.4.0 > /dev/null 2>&1
+module load samtools/1.13-gcc-9.4.0-python-3.8.12 > /dev/null 2>&1
+module load openjdk/1.8.0_265-b01-gcc-9.4.0 > /dev/null 2>&1
+module load trimmomatic/0.39-gcc-9.4.0 > /dev/null 2>&1
+module load fastqc/0.11.9-gcc-10.3.0 > /dev/null 2>&1
 #module load blast-plus/2.12.0-gcc-10.3.0-python3+-chk-version
-module load test_switch_kcl
-source test_switch
-module load spades/3.15.3-gcc-10.3.0-python3+-chk-version
-module load py-gdc-client/1.6.1-gcc-10.3.0-python3+-chk-version
-module load centrifuge/1.0.4-gcc-10.3.0
+module load test_switch_kcl > /dev/null 2>&1
+source test_switch > /dev/null 2>&1
+module load spades/3.15.3-gcc-10.3.0-python3+-chk-version > /dev/null 2>&1
+module load py-gdc-client/1.6.1-gcc-10.3.0-python3+-chk-version > /dev/null 2>&1
+module load centrifuge/1.0.4-gcc-10.3.0 > /dev/null 2>&1
 
 #Convert bam to fastq
-export bam2fq=/scratch/prj/cb_microbiome/tools/biobambam2/2.0.87-release-20180301132713/x86_64-etch-linux-gnu/bin/bamtofastq 
+export bam2fq=/scratch/prj/cb_microbiome/tools/biobambam2/2.0.87-release-20180301132713/x86_64-etch-linux-gnu/bin/bamtofastq  > /dev/null 2>&1
 
 bam=$(echo /users/k2370926/bam_files/*.bam)
+echo Running bam2fq
 $bam2fq \
     collate=1 \
     exclude=QCFAIL,SECONDARY,SUPPLEMENTARY \
@@ -42,6 +44,7 @@ $bam2fq \
     level=5
 
 #Fastq quality control & trimming 
+echo Running fastqc
 mkdir fastqc
 fastqc  *_F1.fq.gz --outdir fastqc
 fastqc  *_F2.fq.gz --outdir fastqc
