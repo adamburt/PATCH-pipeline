@@ -43,6 +43,7 @@ $bam2fq \
     exclude=QCFAIL,SECONDARY,SUPPLEMENTARY \
     level=5
 
+:'
 #Fastq quality control & trimming 
 echo Running fastqc
 mkdir fastqc
@@ -99,7 +100,7 @@ grep -e 'pathogen_of_interest' kraken/output_kraken.txt | awk '{print $2}' > kra
 -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle' \
 -max_target_seqs 1 -max_hsps 1 -out kraken/pathogen_gene_annotation.blastn
 
-:'
+
 #Using 
 mkdir centrifuge
 /scratch/prj/cb_microbiome/tools/centrifuge/centrifuge -x /scratch/users/k1802884/azure/radhika/centrifuge/p_compressed+h+v \
