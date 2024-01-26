@@ -26,6 +26,7 @@ module load centrifuge/1.0.4-gcc-10.3.0 > /dev/null 2>&1
 #Convert bam to fastq
 export bam2fq=/scratch/prj/cb_microbiome/tools/biobambam2/2.0.87-release-20180301132713/x86_64-etch-linux-gnu/bin/bamtofastq  > /dev/null 2>&1
 
+:'
 bam=$(echo /users/k2370926/bam_files/*.bam)
 echo Running bam2fq
 $bam2fq \
@@ -42,14 +43,15 @@ $bam2fq \
     gz=1 \
     exclude=QCFAIL,SECONDARY,SUPPLEMENTARY \
     level=5
+'
 
-:'
 #Fastq quality control & trimming 
 echo Running fastqc
 mkdir fastqc
 fastqc  *_F1.fq.gz --outdir fastqc
 fastqc  *_F2.fq.gz --outdir fastqc
 
+:'
 for fastq in *_F1.fq.gz 
 do
         base=${fastq%%_F1.fq.gz}
