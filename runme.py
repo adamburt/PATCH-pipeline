@@ -6,7 +6,7 @@ from beaupy import confirm, select, select_multiple
 
 
 def main():
-    args = sys.argv()
+    args = sys.argv
     try:
         token = args[1]
     except:
