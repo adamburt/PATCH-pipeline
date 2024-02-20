@@ -24,7 +24,7 @@ module load py-gdc-client/1.6.1-gcc-10.3.0-python3+-chk-version > /dev/null 2>&1
 module load centrifuge/1.0.4-gcc-10.3.0 > /dev/null 2>&1
 
 #Convert bam to fastq
-export bam2fq=/scratch/prj/cb_microbiome/tools/biobambam2/2.0.87-release-20180301132713/x86_64-etch-linux-gnu/bin/bamtofastq  > /dev/null 2>&1
+#export bam2fq=/scratch/prj/cb_microbiome/tools/biobambam2/2.0.87-release-20180301132713/x86_64-etch-linux-gnu/bin/bamtofastq  > /dev/null 2>&1
 
 
 bam=$(echo /scratch/prj/cb_microbiome/bam_files/*.bam)
@@ -91,7 +91,7 @@ echo ${sample} Unmapped bam to fastq
 
 mkdir kraken
 
-/scratch/prj/cb_microbiome/tools/kraken2/kraken2-2.1.3/kraken2/kraken2 --use-names  --db /scratch/users/k1802884/azure/radhika/kraken/refseq/standard spades/transcripts.fasta \
+/scratch/prj/cb_microbiome/tools/kraken2/kraken2-2.1.3/kraken2/kraken2 --use-names  --db /scratch/prj/cb_microbiome/databases/kraken/databases/refseq/standard spades/transcripts.fasta \
 --report kraken/kraken_report.txt --classified-out kraken/kraken_classifications.txt >> kraken/output_kraken.txt
 
 grep -e 'pathogen_of_interest' kraken/output_kraken.txt | awk '{print $2}' > kraken/pathogen_nodes.txt
