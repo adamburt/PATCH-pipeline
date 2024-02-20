@@ -1,14 +1,4 @@
 #!/bin/bash -l
-#SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --job-name=blastn-redo
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem-per-cpu=20000
-#SBATCH --output=blastn_2021.out.%j
-
-#Convert bam to fastq
-#export bam2fq=/scratch/prj/cb_microbiome/tools/biobambam2/2.0.87-release-20180301132713/x86_64-etch-linux-gnu/bin/bamtofastq  > /dev/null 2>&1
 
 cd /scratch
 bam=$(echo /scratch/prj/cb_microbiome/bam_files/*.bam)
