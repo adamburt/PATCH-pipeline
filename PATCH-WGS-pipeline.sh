@@ -27,32 +27,32 @@ module load centrifuge/1.0.4-gcc-10.3.0 > /dev/null 2>&1
 #export bam2fq=/scratch/prj/cb_microbiome/tools/biobambam2/2.0.87-release-20180301132713/x86_64-etch-linux-gnu/bin/bamtofastq  > /dev/null 2>&1
 
 
-bam=$(echo /scratch/prj/cb_microbiome/bam_files/*.bam)
-echo Running bam2fq
-$bam2fq \
-    collate=1 \
-    exclude=QCFAIL,SECONDARY,SUPPLEMENTARY \
-    filename=${bam} \
-    inputformat=bam \
-    F=${bam%%.bam}_F1.fq.gz \
-    F2=${bam%%.bam}_F2.fq.gz \
-    S=${bam%%.bam}_s.fq.gz \
-    0=${bam%%.bam}_0.fq.gz \
-    02=${bam%%.bam}_02.fq.gz \
-    tryoq=1 \
-    gz=1 \
-    exclude=QCFAIL,SECONDARY,SUPPLEMENTARY \
-    level=5
+#bam=$(echo /scratch/prj/cb_microbiome/bam_files/*.bam)
+#echo Running bam2fq
+#$bam2fq \
+#    collate=1 \
+#    exclude=QCFAIL,SECONDARY,SUPPLEMENTARY \
+#    filename=${bam} \
+#    F=${bam%%.bam}_F1.fq.gz \
+#    F2=${bam%%.bam}_F2.fq.gz \
+#    S=${bam%%.bam}_s.fq.gz \
+#    inputformat=bam \
+#    0=${bam%%.bam}_0.fq.gz \
+#    02=${bam%%.bam}_02.fq.gz \
+#    tryoq=1 \
+#    gz=1 \
+#    exclude=QCFAIL,SECONDARY,SUPPLEMENTARY \
+#    level=5
 
 
 #Fastq quality control & trimming 
 echo Running fastqc
 mkdir fastqc
-fastqc  *_F1.fq.gz --outdir fastqc
-fastqc  *_F2.fq.gz --outdir fastqc
+fastqc  /scratch/users/k2370926/*_F1.fq.gz --outdir ./fastqc
+fastqc  /scratch/users/k2370926/*_F2.fq.gz --outdir ./fastqc
 
 
-for fastq in *_F1.fq.gz 
+for fastq in ./fastqc/*_F1.fq.gz 
 do
         base=${fastq%%_F1.fq.gz}
         trimmomatic PE \
