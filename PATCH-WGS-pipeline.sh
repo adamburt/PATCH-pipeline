@@ -45,7 +45,8 @@ module load centrifuge/1.0.4-gcc-10.3.0 > /dev/null 2>&1
 #    level=5
 
 
-#Fastq quality control & trimming 
+#Fastq quality control & trimming
+cd /scratch/users/k2370926
 echo Running fastqc
 mkdir fastqc
 fastqc  /scratch/users/k2370926/*_F1.fq.gz --outdir ./fastqc
