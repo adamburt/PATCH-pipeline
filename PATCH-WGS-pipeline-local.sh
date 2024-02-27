@@ -1,35 +1,26 @@
 #!/bin/bash -l
 
+
+bam2fq=bamtofastq
 cd /scratch
+mkdir /scratch/processed_data
+mkdir /scratch/processed_data/bam_processed
 bam=$(echo /scratch/prj/cb_microbiome/bam_files/*.bam)
 echo Running bam2fq
-$bam2fq \
-    collate=1 \
-    exclude=QCFAIL,SECONDARY,SUPPLEMENTARY \
-    filename=${bam} \
-    inputformat=bam \
-    F=${bam%%.bam}_F1.fq.gz \
-    F2=${bam%%.bam}_F2.fq.gz \
-    S=${bam%%.bam}_s.fq.gz \
-    0=${bam%%.bam}_0.fq.gz \
-    02=${bam%%.bam}_02.fq.gz \
-    tryoq=1 \
-    gz=1 \
-    exclude=QCFAIL,SECONDARY,SUPPLEMENTARY \
-    level=5
+$bam2fq collate=1 exclude=QCFAIL,SECONDARY,SUPPLEMENTARY filename=${bam} outputdir=/scratch/processed_data/bam_processed inputformat=bam F=/scratch/processed_data/bam_processed/${bam%%.bam}_F1.fq.gz F2=/scratch/processed_data/bam_processed/${bam%%.bam}_F2.fq.gz S=/scratch/processed_data/bam_processed/${bam%%.bam}_s.fq.gz 0=/scratch/processed_data/bam_processed/${bam%%.bam}_0.fq.gz 02=/scratch/processed_data/bam_processed/${bam%%.bam}_02.fq.gz tryoq=1 gz=1 exclude=QCFAIL,SECONDARY,SUPPLEMENTARY level=5
 
 
-#Fastq quality control & trimming 
+#Fastq quality control & trimming
 echo Running fastqc
-mkdir fastqc
-fastqc  *_F1.fq.gz --outdir fastqc
-fastqc  *_F2.fq.gz --outdir fastqc
+mkdir /scratch/processed_data/fastqc
+fastqc  /scratch/processed_data/bam_processed/*_F1.fq.gz --outdir /scratch/processed_data/fastqc
+fastqc  /scratch/processed_data/bam_processed/*_F2.fq.gz --outdir /scratch/processed_data/fastqc
 
 
-for fastq in *_F1.fq.gz 
+for fastq in /scratch/processed_data/fastqc/*_F1.fq.gz 
 do
         base=${fastq%%_F1.fq.gz}
-        trimmomatic PE \
+        java -jar /scratch/prj/cb_microbiome/tools/Trimmomatic-0.39/trimmomatic-0.39.jar PE \
         ${base}_F1.fq.gz \
         ${base}_F2.fq.gz \
         ${base}_trimmed_F1.fq.gz \
@@ -39,8 +30,10 @@ do
         LEADING:28 TRAILING:28 SLIDINGWINDOW:4:28 MINLEN:28 
 done
 
-fq1=*_trimmed_F1.fq.gz
-fq2=*_trimmed_F2.fq.gz
+
+
+fq1=/scratch/processed_data/fastqc/*_trimmed_F1.fq.gz
+fq2=/scratch/processed_data/fastqc/*_trimmed_F2.fq.gz
 
 #Align to combined reference genome
 
@@ -105,4 +98,3 @@ seqtk subseq spades/transcripts.fasta blastn/pathogen_nodes.txt > blastn/pathoge
 blastn -query blastn/pathogen_reads.fasta -db pathogens_of_interest_ref_database.fa \
 -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle' \
 -max_target_seqs 1 -max_hsps 1 -out blastn/pathogen_gene_annotation.blastn
-
