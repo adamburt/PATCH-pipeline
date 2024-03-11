@@ -1,26 +1,51 @@
 #!/bin/bash -l
+if [ $# -eq 0 ]
+  then
+    echo "No UUID supplied, please supply the UUID:  PATCH-WGS-piepline-local.sh <UUID>"
+    exit -1
+fi
+uuid=$1
+bam_files_location="/scratch/bam_files"
+output_fastq_files="/scratch/processed_data/fastqc"
+trimmomatic_jar_file="/scratch/prj/cb_microbiome/tools/Trimmomatic-0.39/trimmomatic-0.39.jar"
+human_genome_lib="/scratch/prj/cb_microbiome/databases/kraken/databases/refseq/standard/library/human/library.fna"
+kraken_standard_db="/scratch/prj/cb_microbiome/databases/kraken/databases/refseq/standard/library/human/library.fna"
+bam_aligned_folder="/scratch/processed_data/bam_aligned"
+spades_output_folder="/scratch/processed_data/spades"
+kraken_directory="/scratch/processed_data/kraken"
 
-
+# Convert BAM to FastQ
 bam2fq=bamtofastq
-cd /scratch
-mkdir /scratch/processed_data
-mkdir /scratch/processed_data/bam_processed
-bam=$(echo /scratch/prj/cb_microbiome/bam_files/*.bam)
-echo Running bam2fq
-$bam2fq collate=1 exclude=QCFAIL,SECONDARY,SUPPLEMENTARY filename=${bam} outputdir=/scratch/processed_data/bam_processed inputformat=bam F=/scratch/processed_data/bam_processed/${bam%%.bam}_F1.fq.gz F2=/scratch/processed_data/bam_processed/${bam%%.bam}_F2.fq.gz S=/scratch/processed_data/bam_processed/${bam%%.bam}_s.fq.gz 0=/scratch/processed_data/bam_processed/${bam%%.bam}_0.fq.gz 02=/scratch/processed_data/bam_processed/${bam%%.bam}_02.fq.gz tryoq=1 gz=1 exclude=QCFAIL,SECONDARY,SUPPLEMENTARY level=5
-
+cd ${bam_files_location}
+bam="${bam_files_location}/${uuid}.bam"
+echo "Running bam2fq on file ${uuid}.bam"
+$bam2fq \
+        collate=1 \
+        exclude=QCFAIL,SECONDARY,SUPPLEMENTARY \
+        filename=${bam} \
+        outputdir=${output_fastq_files}/ \
+        inputformat=bam \
+        F="${output_fastq_files}/${bam%%.bam}_F1.fq.gz" \
+        F2="${output_fastq_files}/${bam%%.bam}_F2.fq.gz" \
+        S="${output_fastq_files}/${bam%%.bam}_s.fq.gz" \
+        tryoq=1 \
+        gz=1 \
+        level=5
 
 #Fastq quality control & trimming
 echo Running fastqc
-mkdir /scratch/processed_data/fastqc
-fastqc  /scratch/processed_data/bam_processed/*_F1.fq.gz --outdir /scratch/processed_data/fastqc
-fastqc  /scratch/processed_data/bam_processed/*_F2.fq.gz --outdir /scratch/processed_data/fastqc
+for file in "${output_fastq_files}/*_F*.fq.gz"
+do
+    echo Running fastqc on ${file}
+    fastqc ${file} -o ${output_fastq_files}
+done
 
-
-for fastq in /scratch/processed_data/fastqc/*_F1.fq.gz 
+# Run Trimmomatic
+echo Running Trimmomatic
+for fastq in ${output_fastq_files}/*_F1.fq.gz 
 do
         base=${fastq%%_F1.fq.gz}
-        java -jar /scratch/prj/cb_microbiome/tools/Trimmomatic-0.39/trimmomatic-0.39.jar PE \
+        java -jar ${trimmomatic_jar_file} PE \
         ${base}_F1.fq.gz \
         ${base}_F2.fq.gz \
         ${base}_trimmed_F1.fq.gz \
@@ -30,41 +55,45 @@ do
         LEADING:28 TRAILING:28 SLIDINGWINDOW:4:28 MINLEN:28 
 done
 
-
-
-fq1=/scratch/processed_data/fastqc/*_trimmed_F1.fq.gz
-fq2=/scratch/processed_data/fastqc/*_trimmed_F2.fq.gz
-
 #Align to combined reference genome
+echo Aligning to combined reference genome
+fq1=${output_fastq_files}/*_trimmed_F1.fq.gz
+fq2=${output_fastq_files}/*_trimmed_F2.fq.gz
+bwa mem ${human_genome_lib} ${fq1} ${fq2} -t 12 -o "${output_fastq_files}/sam_file_temp.sam"
 
-bwa mem /scratch/prj/cb_microbiome/databases/kraken/databases/refseq/standard/library/human/library.fna ${fq1} ${fq2} -t 10 | samtools sort -o ${sample}_host_aligned.bam - 
+
+# Sort aligned data
+echo Sorting aligned data
+samtools sort -o "${output_fastq_files}/${uuid}_host_aligned.bam" "${output_fastq_files}/sam_file_temp.sam"
 
 #Extract "unmapped"/ non-human reads using samtools flags
-samtools view -F 4 ${sample}_host_aligned.bam > ${sample}_host_aligned.bam_unmapped.bam
-echo ${sample} Unmapped extracted
+echo Extracting unmapped data
+samtools view -F 4 ${bam_aligned_folder}/host_aligned.bam > ${bam_aligned_folder}/unmapped.bam
 
 #Sort the bam file using samtools
-samtools sort ${sample}_unmapped.bam > ${sample}_unmapped_sorted.bam
+samtools sort ${bam_aligned_folder}/unmapped.bam > ${bam_aligned_folder}/unmapped_sorted.bam
 
 #Convert bam file to fastq format using bedtools
-bedtools bamtofastq -i ${sample}_unmapped_sorted.bam -fq ${sample}_unmapped_F1.fq -fq2 ${sample}_unmapped_F2.fq
+bedtools bamtofastq -i ${bam_aligned_folder}/unmapped_sorted.bam -fq ${bam_aligned_folder}/unmapped_F1.fq -fq2 ${bam_aligned_folder}/unmapped_F2.fq
 
-echo ${sample} Unmapped bam to fastq
+echo Unmapped bam to fastq
 
 #Denovo assemlbly of unmapped reads using SPAdes
-spades -1 ${sample}_unmapped_F1.fq -2 ${sample}_unmapped_F2.fq --only-assembler -o spades
+echo Running spades
+spades -1 ${bam_aligned_folder}/unmapped_F1.fq -2 ${bam_aligned_folder}/unmapped_F2.fq --only-assembler -o ${spades_output_folder}
 
 #Run kraken for pathogen classification 
+echo Running Kraken
 
-mkdir kraken
+kraken2 --use-names  --db ${kraken_standard_db} \
+--report ${kraken_directory}/kraken_report.txt --classified-out ${kraken_directory}/kraken_classifications.txt >> ${kraken_directory}/output_kraken.txt
 
-kraken2 --use-names  --db /scratch/prj/cb_microbiome/databases/kraken/databases/refseq/standard spades/transcripts.fasta \
---report kraken/kraken_report.txt --classified-out kraken/kraken_classifications.txt >> kraken/output_kraken.txt
+grep -e 'pathogen_of_interest' ${kraken_directory}/output_kraken.txt | awk '{print $2}' > ${kraken_directory}/pathogen_nodes.txt
 
-grep -e 'pathogen_of_interest' kraken/output_kraken.txt | awk '{print $2}' > kraken/pathogen_nodes.txt
+seqtk subseq ${spades_output_folder}/transcripts.fasta ${kraken_directory}/pathogen_nodes.txt > ${kraken_directory}/pathogen_sequences.fasta
 
-seqtk subseq spades/transcripts.fasta kraken/pathogen_nodes.txt > kraken/pathogen_sequences.fasta
 
+'''
 blastn -query kraken_2021/fuso_seq_21.fasta -db pathogens_of_interest_ref_database.fa \
 -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle' \
 -max_target_seqs 1 -max_hsps 1 -out kraken/pathogen_gene_annotation.blastn
@@ -98,3 +127,4 @@ seqtk subseq spades/transcripts.fasta blastn/pathogen_nodes.txt > blastn/pathoge
 blastn -query blastn/pathogen_reads.fasta -db pathogens_of_interest_ref_database.fa \
 -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle' \
 -max_target_seqs 1 -max_hsps 1 -out blastn/pathogen_gene_annotation.blastn
+'''
