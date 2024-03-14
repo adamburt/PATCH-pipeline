@@ -1,1 +1,3 @@
 beaupy
+tqdm
+coloredlogs

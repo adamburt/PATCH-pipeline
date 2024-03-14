@@ -185,7 +185,7 @@ echo "
 "
 
 # Check if -p argument is present
-if [ -z "$pathogen_of_interest" ]; then
+if [[ ${#pathogen_of_interest} -gt 0 ]] ; then
   echo "Pathogen = '${pathogen_of_interest}'"
   grep -e '${pathogen_of_interest}' ${kraken_directory}/${uuid}_output_kraken.txt | awk '{print $2}' > ${kraken_directory}/${uuid}_pathogen_nodes.txt
 else
@@ -212,7 +212,7 @@ echo "
 ########################################
 "
 centrifuge -x ${centrifuge_dir}/${uuid}_p_compressed+h+v -f ${spades_output_folder}/${uuid}/transcripts.fasta --report-file ${centrifuge_dir}/${uuid}_centrifuge_report.txt -S ${centrifuge_dir}/${uuid}_centrifuge_output.txt
-if [ -z "$pathogen_of_interest" ]; then
+if [[ ${#pathogen_of_interest} -gt 0 ]] ; then
   grep -e '${pathogen_of_interest}' ${centrifuge_dir}/${uuid}_centrifuge_report.txt | awk '{print $3}' | sort | uniq > ${centrifuge_dir}/${uuid}_tax_id_list.txt
 else
   cat ${centrifuge_dir}/${uuid}_centrifuge_report.txt | awk '{print $3}' | sort | uniq > ${centrifuge_dir}/${uuid}_tax_id_list.txt
@@ -231,7 +231,7 @@ echo "
 "
 
 blastn --db ${kraken2_db_dir} -query ${spades_output_folder}/${uuid}_transcripts.fasta -num_threads 6 -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle' -max_target_seqs 1 -max_hsps 1 -out ${blastn_dir}/${uuid}_blastn_output.txt
-if [ -z "$pathogen_of_interest" ]; then
+if [[ ${#pathogen_of_interest} -gt 0 ]] ; then
   grep -e '${pathogen_of_interest}' ${blastn_dir}/${uuid}_blastn_output.txt | awk '{print $1}' | sort -u | uniq > ${blastn_dir}/${uuid}_pathogen_nodes.txt
 else
   cat ${blastn_dir}/${uuid}_blastn_output.txt | awk '{print $1}' | sort -u | uniq > ${blastn_dir}/${uuid}_pathogen_nodes.txt

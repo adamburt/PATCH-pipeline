@@ -10,14 +10,16 @@ spades_output_folder="/scratch/processed_data/spades"
 kraken2_db_dir="/scratch/databases/kraken2_db"
 kraken_directory="/scratch/processed_data/kraken"
 centrifuge_dir="/scratch/processsed_data/centrifuge"
-splice_sites_file="/scratch/databases/GRCh38/splice_sites/splice_sites.tsv"
-grch38_index_folder="/scratch/databases/GRCh38/index"
-blastn_dir="/scratch/databases/blastn"
+centrifuge_db_dir="/scratch/databases/centrifuge"
+#splice_sites_file="/scratch/databases/GRCh38/splice_sites/splice_sites.tsv"
+splice_sites_file="/scratch/databases/hisat/splicesites.tsv"
+#grch38_index_folder="/scratch/databases/GRCh38/index"
+grch38_index_folder="/scratch/databases/hisat/index"
+blastn_dir="/scratch/processed_data/blastn"
 uuid=""
 only_download=false
 show_help=false
 reset=false
-pathogen_of_interest=""
 
 # Parse command line arguments
 while getopts ":u:dhrp:" opt; do
@@ -113,6 +115,13 @@ echo "
 ##############################
 "
 
+if ! [ -f ${output_fastq_files}/${uuid}_F1.fq ]; then
+  if ! [ -f ${output_fastq_files}/${uuid}_F2.fq ]; then
+    echo "Both ${output_fastq_files}/${uuid}_F1.fq} and ${output_fastq_files}/${uuid}_F2.fq already exist"
+  fi
+fi
+
+
 # Convert BAM to FastQ
 echo "Running bam2fq on file ${uuid}.bam"
 bedtools bamtofastq -i ${bam_files_location}/${uuid}.bam -fq ${output_fastq_files}/${uuid}_F1.fq -fq2 ${output_fastq_files}/${uuid}_F2.fq > /dev/null 2>&1
@@ -193,12 +202,12 @@ echo "
 "
 
 # Check if -p argument is present
-if [ -z "$pathogen_of_interest" ]; then
+if [[ ${#pathogen_of_interest} -gt 0 ]] ; then
   echo "Pathogen = '${pathogen_of_interest}'"
   grep -e '${pathogen_of_interest}' ${kraken_directory}/${uuid}_output_kraken.txt | awk '{print $2}' > ${kraken_directory}/${uuid}_pathogen_nodes.txt
 else
   echo "Pathogen = ALL"
-  cat ${kraken_directory}/${uuid}_output_kraken.txt | awk '{print $2}' > ${kraken_directory}/${uuid}_pathogen_nodes.txt
+   
 fi
 
 seqtk subseq ${spades_output_folder}/${uuid}/transcripts.fasta ${kraken_directory}/${uuid}_pathogen_nodes.txt > ${kraken_directory}/${uuid}_pathogen_sequences.fasta
@@ -219,8 +228,8 @@ echo "
 ### Running Centrifuge classification ##
 ########################################
 "
-centrifuge -x ${centrifuge_dir}/${uuid}_p_compressed+h+v -f ${spades_output_folder}/${uuid}/transcripts.fasta --report-file ${centrifuge_dir}/${uuid}_centrifuge_report.txt -S ${centrifuge_dir}/${uuid}_centrifuge_output.txt
-if [ -z "$pathogen_of_interest" ]; then
+centrifuge -x ${centrifuge_db_dir}/p_compressed+h+v -f ${spades_output_folder}/${uuid}/transcripts.fasta --report-file ${centrifuge_dir}/${uuid}_centrifuge_report.txt -S ${centrifuge_dir}/${uuid}_centrifuge_output.txt
+if [[ ${#pathogen_of_interest} -gt 0 ]] ; then
   grep -e '${pathogen_of_interest}' ${centrifuge_dir}/${uuid}_centrifuge_report.txt | awk '{print $3}' | sort | uniq > ${centrifuge_dir}/${uuid}_tax_id_list.txt
 else
   cat ${centrifuge_dir}/${uuid}_centrifuge_report.txt | awk '{print $3}' | sort | uniq > ${centrifuge_dir}/${uuid}_tax_id_list.txt
@@ -239,7 +248,7 @@ echo "
 "
 
 blastn --db ${kraken2_db_dir} -query ${spades_output_folder}/${uuid}_transcripts.fasta -num_threads 6 -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle' -max_target_seqs 1 -max_hsps 1 -out ${blastn_dir}/${uuid}_blastn_output.txt
-if [ -z "$pathogen_of_interest" ]; then
+if [[ ${#pathogen_of_interest} -gt 0 ]] ; then
   grep -e '${pathogen_of_interest}' ${blastn_dir}/${uuid}_blastn_output.txt | awk '{print $1}' | sort -u | uniq > ${blastn_dir}/${uuid}_pathogen_nodes.txt
 else
   cat ${blastn_dir}/${uuid}_blastn_output.txt | awk '{print $1}' | sort -u | uniq > ${blastn_dir}/${uuid}_pathogen_nodes.txt
