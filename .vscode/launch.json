@@ -1,0 +1,32 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Execute paired",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": ["paired", "--uuid", "af032832-ddac-4fa1-a180-cbe10c1dfda3", "--start", "2", "--base_dir", "/scratch/processed_data", "--bam-files-dir", "/scratch/bam_files", "--trimmomatic-jar", "/scratch/files/trimmomatic/trimmomatic-0.39.jar", "--token", "/home/create/token.txt", "--hisat-db-dir", "/scratch/files/hisat", "--splice-sites-file", "scratch/files/splicesites/splicesites.tsv", "--kraken-db-dir", "/scratch/files/kraken", "--centrifuge-db-dir", "/scratch/files/centrifuge"]
+        },
+        {
+            "name": "Execute build",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": ["build"]
+        },
+        {
+            "name": "Execute test",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": ["test"]
+        }
+    ]
+}
