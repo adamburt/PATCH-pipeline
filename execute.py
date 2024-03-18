@@ -8,16 +8,21 @@ import logging
 import sys
 from tqdm import tqdm
 import requests
-from beaupy import confirm
+from beaupy import confirm, prompt, console, select
 from beaupy.spinners import Spinner, DOTS, ARC
 import zipfile
+import gzip
+import tarfile
 
 
 class Env():
-    def __init__(self, mode: str, uuid: str, base_dir: str, bam_files_dir: str, trimmomatic_jar: str, hisat_db_dir: str, splice_sites_file: str, kraken_db_dir: str, pathogen: str, centrifuge_db_dir: str, token_file: str, start: int = 1, reset: bool = False):
+    def __init__(self, mode: str, uuid: str, base_dir: str, bam_files_dir: str, trimmomatic_jar: str, hisat_db_dir: str, splice_sites_file: str, kraken_db_dir: str, pathogen: str, centrifuge_db_dir: str, token_file: str, start: int = 1, reset: bool = False, skip_quality: bool = False):
         self.mode: str = mode
         self.uuid: str = uuid
-        self.base_dir: str = os.path.join(base_dir, uuid)
+        if base_dir:
+            self.base_dir: str = os.path.join(base_dir, uuid)
+        else:
+            self.base_dir = ""
         self.start: int = int(start)
         self.bam_files_dir: str = bam_files_dir
         self.fastq_dir: str = os.path.join(self.base_dir, "fastq_output")
@@ -36,6 +41,7 @@ class Env():
         self.splice_sites_file: str = splice_sites_file
         self.kraken_db_dir: str = kraken_db_dir
         self.pathogen: str = pathogen
+        self.skip_quality: bool = skip_quality
         self.token_file: str = token_file
         self.token: str = ""
         self.reset: bool = reset
@@ -46,8 +52,14 @@ class Env():
 
         # Validate we have all options specified
         check_items = [
+            {self.uuid:
+                "You must provide a UUID to process (--uuid)"},
+            {self.base_dir:
+                "You must provide a base directory that will contain results files (--base-dir)"},
             {self.bam_files_dir:
                 "You must provide a directory that will contain the bam files (--bam-files-dir)"},
+            {self.trimmomatic_jar:
+                "You must provide the file location to the Trimmomatic jar file (--trimmomatic-jar)"},
             {self.centrifuge_db_dir:
                 "You must provide a directory that contains the centrifuge database (--centrifuge-db-dir)"},
             {self.hisat_db_dir:
@@ -78,34 +90,7 @@ class Env():
 
         if not os.path.exists(self.trimmomatic_jar):
             if confirm(f'Could not find the jar file {self.trimmomatic_jar}, would you like to download it?'):
-                os.makedirs(os.path.dirname(
-                    self.trimmomatic_jar), exist_ok=True)
-                url = "http://www.usadellab.org/cms/uploads/supplementary/Trimmomatic/Trimmomatic-0.39.zip"
-                filepath = f"{self.trimmomatic_jar.rstrip('.jar')}.zip"
-                download_file(url, filepath, "Trimmomatic", keep=False)
-                log.info(f"Extracting {filepath}")
-                with zipfile.ZipFile(filepath, 'r') as zip_ref:
-                    file_list = zip_ref.namelist()
-
-                    common_prefix = os.path.commonprefix(file_list)
-
-                    for file in file_list:
-                        if file == common_prefix:
-                            continue
-                        extracted_path = os.path.join(os.path.dirname(
-                            self.trimmomatic_jar), file[len(common_prefix):])
-
-                        # Ensure parent directories exist
-                        os.makedirs(os.path.dirname(
-                            extracted_path), exist_ok=True)
-
-                        # Extract the file
-                        try:
-                            with zip_ref.open(file) as source, open(extracted_path, 'wb') as dest:
-                                dest.write(source.read())
-                        except IsADirectoryError:
-                            os.makedirs(extracted_path, exist_ok=True)
-                os.remove(filepath)
+                self.create_trimmomatic_jar()
             else:
                 success = False
                 log.error(
@@ -133,13 +118,231 @@ class Env():
         if not os.path.exists(self.token_file):
             log.warning(
                 f"The token file ({self.token_file}) does not exist, it will be required if downloading BAM files")
-        else:
+
+        if os.path.exists(self.token_file):
             with open(self.token_file, "r") as fp:
                 data = fp.read()
                 token = data.strip()
                 self.token = token
-
         return success
+
+    def create_trimmomatic_jar(self, filedir: str) -> str:
+        jar_file = os.path.join(filedir, "trimmomatic.jar")
+        zip_file = jar_file.replace(".jar", ".zip")
+
+        if not os.path.exists(filedir):
+            try:
+                os.makedirs(filedir, exist_ok=True)
+            except Exception as err:
+                log.error(err)
+                sys.exit(-1)
+
+        url = "http://www.usadellab.org/cms/uploads/supplementary/Trimmomatic/Trimmomatic-0.39.zip"
+        download_file(url, zip_file, os.path.basename(zip_file), keep=False)
+        with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+            file_list = zip_ref.namelist()
+
+            common_prefix = os.path.commonprefix(file_list)
+
+            for file in file_list:
+                if file == common_prefix:
+                    continue
+                extracted_path = os.path.join(
+                    filedir, file[len(common_prefix):])
+
+                # Ensure parent directories exist
+                os.makedirs(os.path.dirname(
+                    extracted_path), exist_ok=True)
+
+                # Extract the file
+                try:
+                    with zip_ref.open(file) as source, open(extracted_path, 'wb') as dest:
+                        dest.write(source.read())
+                except IsADirectoryError:
+                    os.makedirs(extracted_path, exist_ok=True)
+        try:
+            os.remove(zip_file)
+        except:
+            pass
+        return jar_file, []
+
+    def create_centrifuge_db(self, filedir):
+        gunzip_file = os.path.join(filedir, "genome.tar.gz")
+        if not os.path.exists(filedir):
+            os.makedirs(filedir, exist_ok=True)
+        error_code, output_msg, errors = execute([
+            "chmod",
+            "-R",
+            "775",
+            filedir
+        ])
+        console.print(
+            "Please select the Centrifuge database to download and extract:")
+        choices = {
+            "Refseq: bacteria, archaea, viral, human (compressed)": "https://genome-idx.s3.amazonaws.com/centrifuge/p_compressed%2Bh%2Bv.tar.gz",
+            "Refseq: bacteria, archaea, viral, human": "https://genome-idx.s3.amazonaws.com/centrifuge/p%2Bh%2Bv.tar.gz"
+        }
+        choice = select(list(choices.keys()))
+        if choice:
+            url = choices[choice]
+            download_file(url, gunzip_file, os.path.basename(
+                gunzip_file), keep=False)
+
+            extr = Spinner(DOTS, "Extracting database...")
+            extr.start()
+            with tarfile.open(gunzip_file, 'r:gz') as tar:
+                tar.extractall(path=os.path.dirname(gunzip_file))
+            extr.stop()
+            try:
+                os.remove(gunzip_file)
+            except:
+                pass
+        return filedir, []
+
+    def create_kraken_db(self, filedir):
+        gunzip_file = os.path.join(filedir, "kraken.tar.gz")
+        if not os.path.exists(filedir):
+            os.makedirs(filedir, exist_ok=True)
+        error_code, output_msg, errors = execute([
+            "chmod",
+            "-R",
+            "775",
+            filedir
+        ])
+        console.print(
+            "Please select the Kraken database to download and extract:")
+        choices = {
+            "Standard (55GB)": "https://genome-idx.s3.amazonaws.com/kraken/k2_standard_20240112.tar.gz",
+            "Standard-8 (8GB)": "https://genome-idx.s3.amazonaws.com/kraken/k2_standard_08gb_20240112.tar.gz",
+            "Standard-16 (16GB)": "https://genome-idx.s3.amazonaws.com/kraken/k2_standard_16gb_20240112.tar.gz",
+            "nt Database (550GB)": "https://genome-idx.s3.amazonaws.com/kraken/k2_nt_20231129.tar.gz"
+        }
+        choice = select(list(choices.keys()))
+        if choice:
+            url = choices[choice]
+
+            download_file(url, gunzip_file, os.path.basename(
+                gunzip_file), keep=False)
+
+            extr = Spinner(DOTS, "Extracting database...")
+            extr.start()
+            with tarfile.open(gunzip_file, 'r:gz') as tar:
+                tar.extractall(path=os.path.dirname(gunzip_file))
+            extr.stop()
+            try:
+                os.remove(gunzip_file)
+            except:
+                pass
+        return filedir, []
+
+    def create_hisat_db(self, filedir):
+        gunzip_file = os.path.join(filedir, "genome.fa.gz")
+        genome_file = os.path.join(filedir, "genome.fa")
+        database_file = os.path.join(filedir, "genome")
+        if not os.path.exists(filedir):
+            os.makedirs(filedir, exist_ok=True)
+        error_code, output_msg, errors = execute([
+            "chmod",
+            "-R",
+            "775",
+            filedir
+        ])
+        choices = {
+            "Genome sequence (GRCh38.p14)": "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_45/GRCh38.p14.genome.fa.gz"
+        }
+        console.print(
+            "Please select the Hisat database to download and extract:")
+        choice = select(list(choices.keys()))
+        if choice:
+            url = choices[choice]
+
+        download_file(url, gunzip_file, os.path.basename(
+            gunzip_file), keep=False)
+
+        extr = Spinner(DOTS, "Extracting database...")
+        extr.start()
+        with gzip.open(gunzip_file, 'rb') as f_in:
+            with open(gunzip_file.replace(".gz", ""), 'wb') as f_out:
+                f_out.write(f_in.read())
+        try:
+            os.remove(gunzip_file)
+        except:
+            pass
+        extr.stop()
+
+        followups = [
+            f"hisat2-build -p 4 {genome_file} {database_file}",
+            f"rm {genome_file}"
+        ]
+
+        return database_file, followups
+
+    def create_splicesites_file(self, filedir):
+        gunzip_file = os.path.join(filedir, "gencode_annotations.gtf.gz")
+        gtf_file = os.path.join(filedir, "gencode_annotations.gtf")
+        final_tsv = os.path.join(filedir, "splicesites.tsv")
+        if not os.path.exists(filedir):
+            os.makedirs(filedir, exist_ok=True)
+        error_code, output_msg, errors = execute([
+            "chmod",
+            "-R",
+            "775",
+            filedir
+        ])
+        console.print(
+            "Please select the GRHc GTF files to use to create the splicesites file:")
+        choices = {
+            "EBI - Comprehensive - CHR": "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_45/gencode.v45.annotation.gtf.gz",
+            "EBI - Comprehensive - ALL": "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_45/gencode.v45.chr_patch_hapl_scaff.annotation.gtf.gz",
+            "EBI - Comprehensive - PRI": "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_45/gencode.v45.primary_assembly.annotation.gtf.gz",
+            "EBI - Basic gene annotation - CHR": "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_45/gencode.v45.basic.annotation.gtf.gz",
+            "EBI - Basic gene annotation - ALL": "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_45/gencode.v45.chr_patch_hapl_scaff.basic.annotation.gtf.gz",
+            "EBI - Basic gene annotation - PRI": "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_45/gencode.v45.primary_assembly.basic.annotation.gtf.gz",
+            "NCBI Genomic": "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz"
+        }
+        choice = select(list(choices.keys()))
+        if choice:
+            url = choices[choice]
+            download_file(url, gunzip_file, os.path.basename(
+                gunzip_file), keep=False)
+
+            extr = Spinner(DOTS, "Unzipping...")
+            extr.start()
+            with gzip.open(gunzip_file, 'rb') as f_in:
+                with open(gtf_file, 'wb') as f_out:
+                    f_out.write(f_in.read())
+            extr.stop()
+            try:
+                os.remove(gunzip_file)
+            except:
+                pass
+
+            # Extract Splicesites
+            splice_sites = []
+            extr = Spinner(DOTS, "Extracting sites information...")
+            extr.start()
+            with open(gtf_file, 'r') as f:
+                for line in f:
+                    if not line.startswith('#'):
+                        fields = line.strip().split('\t')
+                        if fields[2] == 'exon':
+                            chrom = fields[0]
+                            start = int(fields[3])
+                            end = int(fields[4])
+                            strand = fields[6]
+
+                            splice_sites.append((chrom, start, end, strand))
+
+            splice_sites.sort(key=lambda x: (x[0], x[3], x[1]))
+
+            with open(final_tsv, 'w') as f_out:
+                for i in range(len(splice_sites) - 1):
+                    if splice_sites[i][0] == splice_sites[i + 1][0] and splice_sites[i][3] == splice_sites[i + 1][3]:
+                        splice_site = splice_sites[i][0], splice_sites[i][2], splice_sites[i +
+                                                                                           1][1], splice_sites[i][3]
+                        f_out.write('\t'.join(map(str, splice_site)) + '\n')
+            extr.stop()
+        return final_tsv, []
 
 
 class Logger():
@@ -172,7 +375,7 @@ def signal_handler(signal, frame):
 
 def execute(cmd: list, show_output: bool = True) -> tuple:
     first_cmd = cmd[0] if isinstance(
-        cmd, list) else cmd if isintance(cmd, str) else ""
+        cmd, list) else cmd if isinstance(cmd, str) else ""
     working = Spinner(DOTS, f"Executing {first_cmd}")
     working.start()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
@@ -224,8 +427,9 @@ def paired(env: Env):
             "X-Auth-Token": env.token
         }
         filepath = os.path.join(env.bam_files_dir, f"{env.uuid}.bam")
-        download_file(url, filepath, headers=headers)
+        download_file(url, filepath, f"{env.uuid}.bam", headers=headers)
         log.info('Download complete')
+        log.info(f'Saved BAM file to {filepath}')
     else:
         log.info("Skipping download")
 
@@ -251,9 +455,11 @@ def paired(env: Env):
             "-fq2",
             uuid_f2
         ])
-        log.info("Conversion complete")
+        log.info(f'Saved fastq file to {uuid_f1}')
+        log.info(f'Saved fastq file to {uuid_f2}')
         if errors:
             log.error(errors)
+            sys.exit(-1)
 
         log.info(f"Conversion complete for {env.uuid}.bam")
     else:
@@ -261,24 +467,29 @@ def paired(env: Env):
 
     # Check quality
     if not env.start > 3:
-        log.info(f"### Checking quality of F*.fq files ###")
-        error_code, output, errors = execute([
-            "fastqc",
-            uuid_f1,
-            "--outdir",
-            env.fastq_dir
-        ])
-        if error_code != 0:
-            log.error(errors)
-        error_code, output, errors = execute([
-            "fastqc",
-            uuid_f2,
-            "--outdir",
-            env.fastq_dir
-        ])
-        if error_code != 0:
-            log.error(errors)
-        log.info("Quality check complete")
+        if not env.skip_quality:
+            log.info(f"### Checking quality of F*.fq files ###")
+            error_code, output, errors = execute([
+                "fastqc",
+                uuid_f1,
+                "--outdir",
+                env.fastq_dir
+            ])
+            if error_code != 0:
+                log.error(errors)
+                sys.exit(-1)
+            error_code, output, errors = execute([
+                "fastqc",
+                uuid_f2,
+                "--outdir",
+                env.fastq_dir
+            ])
+            if error_code != 0:
+                log.error(errors)
+                sys.exit(-1)
+            log.info("Quality check complete")
+        else:
+            log.info("Skipping quality check due to --skip-quality")
     else:
         log.info("Skipping fastqc quality check")
 
@@ -307,32 +518,43 @@ def paired(env: Env):
              ])
         if error_code != 0:
             log.error(errors)
+            sys.exit(-1)
         log.info("Trimming complete")
+        log.info(f'Saved fastq file to {trimmed_f1}')
+        log.info(f'Saved fastq file to {trimmed_f1_up}')
+        log.info(f'Saved fastq file to {trimmed_f2}')
+        log.info(f'Saved fastq file to {trimmed_f2_up}')
 
-        log.info("### Checking quality with fastq ###")
-        error_code, output_msg, errors = execute([
-            "fastqc",
-            trimmed_f1,
-            "--outdir",
-            f"{env.fastq_dir}"
-        ])
-        if error_code != 0:
-            log.error(errors)
+        if not env.skip_quality:
+            log.info("### Checking quality with fastq ###")
+            error_code, output_msg, errors = execute([
+                "fastqc",
+                trimmed_f1,
+                "--outdir",
+                f"{env.fastq_dir}"
+            ])
+            if error_code != 0:
+                log.error(errors)
+                sys.exit(-1)
 
-        error_code, output_msg, errors = execute([
-            "fastqc",
-            trimmed_f2,
-            "--outdir",
-            f"{env.fastq_dir}"
-        ])
-        if error_code != 0:
-            log.error(errors)
-        log.info("Quality check complete")
+            error_code, output_msg, errors = execute([
+                "fastqc",
+                trimmed_f2,
+                "--outdir",
+                f"{env.fastq_dir}"
+            ])
+            if error_code != 0:
+                log.error(errors)
+                sys.exit(-1)
+            log.info("Quality check complete")
+        else:
+            log.info("Skipping quality check due to --skip-quality")
     else:
         log.info("Skipping trimming with Trimmomatic")
 
     #  Hisat
-    trimmed_sam = f"{env.fastq_dir}/{env.uuid}_trimmed_sam"
+    trimmed_sam = f"{env.fastq_dir}/{env.uuid}_trimmed_sam.sam"
+    trimmed_sam_compresssed = f"{env.fastq_dir}/{env.uuid}_trimmed_sam.sam.bz"
     host_aligned = f"{env.fastq_dir}/{env.uuid}_host_aligned.bam"
     if not env.start > 5:
         log.info(f"### Running Hisat and alignment ###")
@@ -348,25 +570,44 @@ def paired(env: Env):
             trimmed_f2,
             "-S",
             trimmed_sam
-        ])
+        ], show_output=False)
 
         if error_code != 0:
             log.error(errors)
+            sys.exit(-1)
         log.info(f"Hisat completed")
-        log.info(f"Executing samtools")
+        log.info(f'Saved file to {trimmed_sam}')
 
+        log.info(f"Compressing sam file")
+        error_code, output_msg, errors = execute([
+            "samtools",
+            "view",
+            "-h",
+            "-o",
+            trimmed_sam_compresssed,
+            trimmed_sam
+        ])
+        if error_code != 0:
+            log.error(errors)
+            sys.exit(-1)
+        log.info(f"Compressing complete")
+        log.info(f'Saved file to {trimmed_sam_compresssed}')
+
+        log.info(f"Converting to bam file")
         error_code, output_msg, errors = execute([
             "samtools",
             "view",
             "-bS",
             "-o",
             host_aligned,
-            trimmed_sam
+            trimmed_sam_compresssed
         ])
         if error_code != 0:
             log.error(errors)
-
+            sys.exit(-1)
         log.info('Samtools complete')
+        log.info(f'Saved file to {host_aligned}')
+
     else:
         log.info("Skipping Hisat alignment")
 
@@ -383,17 +624,18 @@ def paired(env: Env):
             "view",
             "-F",
             "4",
-            "host_aligned",
+            host_aligned,
             "-o",
             unmapped_bam
         ])
 
         if error_code != 0:
             log.error(errors)
+            sys.exit(-1)
         log.info('Extraction complete')
+        log.info(f'Saved file to {unmapped_bam}')
 
         log.info("Sorting results")
-
         error_code, output_msg, errors = execute([
             "samtools",
             "sort",
@@ -401,13 +643,13 @@ def paired(env: Env):
             "-o",
             unmapped_sorted
         ])
-
         if error_code != 0:
             log.error(errors)
+            sys.exit(-1)
         log.info("Sorting complete")
+        log.info(f'Saved file to {unmapped_sorted}')
 
         log.info("Converting results to fastq")
-
         error_code, output_msg, errors = execute([
             "bedtools",
             "bamtofastq",
@@ -418,18 +660,18 @@ def paired(env: Env):
             "-fq2",
             unmapped_f2
         ])
-
         if error_code != 0:
             log.error(errors)
+            sys.exit(-1)
         log.info('Conversion complete')
+        log.info(f'Saved fastq file to {unmapped_f1}')
+        log.info(f'Saved fastq file to {unmapped_f2}')
     else:
         log.info("Skipping extraction")
 
     if not env.start > 7:
         log.info("### Running assembly of unmapped reads using SPAdes ###")
 
-        os.mkdirs(os.path.join(
-            env.spades_output_dir, env.uuid), exist_ok=True)
         error_code, output_msg, errors = execute([
             "rnaspades",
             "-1",
@@ -438,11 +680,12 @@ def paired(env: Env):
             unmapped_f2,
             "--only-assembler",
             "-o",
-            f"{env.fastq_dir}/{env.uuid}"
+            env.spades_output_dir
         ])
 
         if error_code != 0:
             log.error(errors)
+            sys.exit(-1)
         log.info('Assembly complete')
     else:
         log.info("Skipping assembly with SPAdes")
@@ -460,7 +703,7 @@ def paired(env: Env):
             "kraken2",
             "--use-names",
             "--db",
-            kraken_db_dir,
+            env.kraken_db_dir,
             "--report",
             kraken_report,
             "--classified-out",
@@ -469,10 +712,13 @@ def paired(env: Env):
             kraken_output,
             spades_transcripts
         ])
-
         if error_code != 0:
             log.error(errors)
+            sys.exit(-1)
         log.info('Kraken2 classification complete')
+        log.info(
+            f'Saved Kraken classifications file to {kraken_classifications}')
+        log.info(f'Saved Kraken output file to {kraken_output}')
     else:
         log.info("Skipping Kraken2 classification")
 
@@ -502,13 +748,16 @@ def paired(env: Env):
                 ">",
                 kraken_pathogen_nodes
             ])
-
         if error_code != 0:
             log.error(errors)
+            sys.exit(-1)
         log.info('Pathogen extraction complete complete')
+        log.info(f'Saved pathogen nodes file to {kraken_pathogen_nodes}')
+    else:
+        log.info("Skipping pathogen extraction")
 
-        log.info('### Sequencing ###')
-
+    if not env.start > 10:
+        log.info('### Sequencing pathogens ###')
         error_code, output_msg, errors = execute([
             "seqtk",
             "subseq",
@@ -517,12 +766,14 @@ def paired(env: Env):
             ">",
             kraken_pathogen_transcripts
         ])
-
         if error_code != 0:
             log.error(errors)
+            sys.exit(-1)
         log.info('Sequencing complete')
+        log.info(
+            f'Saved pathogen transcripts file to {kraken_pathogen_transcripts}')
     else:
-        log.info("Skipping pathogen extraction")
+        log.info("Skipping pathogen sequencing")
 
     # Blastn DB creation
     blastn_db = f"{env.blastn_output_dir}/{env.uuid}/blastndb"
@@ -530,8 +781,8 @@ def paired(env: Env):
     if not env.start > 11:
         log.info("### Creating Blastn DB ###")
 
-        os.mkdirs(os.path.join(env.blastn_output_dir,
-                               env.uuid), exists_ok=True)
+        os.makedirs(os.path.join(env.blastn_output_dir,
+                                 env.uuid), exists_ok=True)
         error_code, output_msg, errors = execute([
             "makeblastdb",
             "-in",
@@ -544,7 +795,9 @@ def paired(env: Env):
 
         if error_code != 0:
             log.error(errors)
+            sys.exit(-1)
         log.info('DB build complete')
+        log.info(f'Saved Blastn DB to {blastn_db}')
     else:
         log.info("Skipping Blastn DB build")
 
@@ -567,10 +820,11 @@ def paired(env: Env):
             "-out",
             kraken_pathogen_gene
         ])
-
         if error_code != 0:
             log.error(errors)
+            sys.exit(-1)
         log.info('DB query complete')
+        log.info(f'Saved kraken pathogen gene file to {kraken_pathogen_gene}')
     else:
         log.info("Skipping Blastn query")
 
@@ -579,7 +833,7 @@ def paired(env: Env):
     centrifuge_output = f"{env.centrifuge_output_dir}/{env.uuid}_centrifuge_output.txt"
     centrifuge_pathogen_nodes = f"{env.centrifuge_output_dir}/{env.uuid}_pathogen_nodes.txt"
     centrifuge_seq_fasta = f"{env.centrifuge_output_dir}/{env.uuid}_pathogen_sequences.fasta"
-    centrifuge_compressed = f"{centrifuge_db_dir}/p_compressed+h+v"
+    centrifuge_compressed = f"{env.centrifuge_db_dir}/p_compressed+h+v"
     if not env.start > 13:
         log.info("### Running Centrifuge classification ###")
 
@@ -597,8 +851,10 @@ def paired(env: Env):
 
         if error_code != 0:
             log.error(errors)
+            sys.exit(-1)
 
-        info.log('### Extracting pathogens ###')
+        log.info('### Extracting pathogens ###')
+        log.info(f'Saved Centrifuge report to {centrifuge_report}')
 
         if env.pathogen:
             error_code, output_msg, errors = execute([
@@ -632,10 +888,11 @@ def paired(env: Env):
             ])
         if error_code != 0:
             log.error(errors)
-
+            sys.exit(-1)
         log.info('Pathogen extraction complete complete')
-        log.info('### Running seqtk and blastn ###')
+        log.info(f'Saved tax ID file to {tax_id_list}')
 
+        log.info('### Running seqtk and blastn ###')
         error_code, output_msg, errors = execute([
             "awk",
             "-F' '",
@@ -655,6 +912,10 @@ def paired(env: Env):
         ])
         if error_code != 0:
             log.error(errors)
+            sys.exit(-1)
+        log.info(
+            f'Saved Centrifuge pathogen nodes to {centrifuge_pathogen_nodes}')
+
         error_code, output_msg, errors = execute([
             "seqtk",
             "subseq",
@@ -665,6 +926,10 @@ def paired(env: Env):
         ])
         if error_code != 0:
             log.error(errors)
+            sys.exit(-1)
+        log.info(
+            f'Saved Centrifuge sequenced fasta file to {centrifuge_seq_fasta}')
+
         error_code, output_msg, errors = execute([
             "blastn",
             "-query",
@@ -680,10 +945,12 @@ def paired(env: Env):
             "-out",
             f"{env.centrifuge_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn"
         ])
-
         if error_code != 0:
             log.error(errors)
-        info.log('Seqtk and blastn complete')
+            sys.exit(-1)
+        log.info('Seqtk and blastn complete')
+        log.info(
+            f'Saved Centrifuge pathogen gene annotation to {env.centrifuge_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn')
         log.info('Centrifuge classification complete')
 
     else:
@@ -697,17 +964,335 @@ def pipeline(env: Env):
     pass
 
 
+def build_environment(env: Env):
+    console.clear()
+    console.print("### Environment builder ###")
+
+    required_directories = {
+        "trimmomatic_jar": {
+            "name": "Trimmomatic jar",
+            "desc": "This is required for running Trimmomatic",
+            "arg": "--trimmomatic-jar",
+            "func": env.create_trimmomatic_jar,
+            "complete": False,
+            "new_path": "",
+            "followups": []
+        },
+        "centrifuge_db_dir": {
+            "name": "Centrifuge DB directory",
+            "desc": "This is required for Centrifuge classification",
+            "arg": "--centrifuge-db-dir",
+            "func": env.create_centrifuge_db,
+            "complete": False,
+            "new_path": "",
+            "followups": []
+        },
+        "kraken_db_dir": {
+            "name": "Kraken2 DB folder",
+            "desc": "This is required for Kraken classification",
+            "arg": "--kraken-db-dir",
+            "func": env.create_kraken_db,
+            "complete": False,
+            "new_path": "",
+            "followups": []
+        },
+        "hisat_db_dir": {
+            "name": "Hisat DB directory",
+            "desc": "This is required for Hisat processing",
+            "arg": "--hisat-db-dir",
+            "func": env.create_hisat_db,
+            "complete": False,
+            "new_path": "",
+            "followups": []
+        },
+        "splicesites_file": {
+            "name": "Splicesites file",
+            "desc": "This is required for Hisat processing",
+            "arg": "--splice-sites-file",
+            "func": env.create_splicesites_file,
+            "complete": False,
+            "new_path": "",
+            "followups": []
+        }
+    }
+
+    for path, details in required_directories.items():
+        name = details.get('name')
+        desc = details.get('desc')
+        arg = details.get('arg')
+        func = details.get('func')
+        new_path = prompt(f"Please provide the directory for {name}:")
+        if new_path:
+            required_directories[path]['new_path'] = new_path
+
+    for path, details in required_directories.items():
+        name = details.get('name')
+        desc = details.get('desc')
+        arg = details.get('arg')
+        func = details.get('func')
+        new_path = details.get('new_path')
+        if new_path:
+            if func:
+                file_path, followups = func(new_path)
+                required_directories[path]['new_path'] = file_path
+                required_directories[path]['complete'] = True
+                required_directories[path]['followups'] = followups
+
+    followups = [v.get('followups')
+                 for k, v in required_directories.items() if v.get('followups')]
+    console.clear()
+    if followups:
+        with open('followup.sh', 'w') as pf:
+            for k, v in required_directories.items():
+                if v.get('followups'):
+                    [pf.write(f"{x}\n") for x in v.get('followups')]
+        console.print("To complete the build please execute:\n\n./followup.sh")
+    console.print(
+        "\n### Complete! ###\n\nEnsure you run any follow up commands (if mentioned above) and then the following file / directories can be used:\n")
+    for path, details in required_directories.items():
+        name = details.get('name')
+        desc = details.get('desc')
+        arg = details.get('arg')
+        func = details.get('func')
+        new_path = details.get('new_path')
+        if new_path:
+            console.print(f"{arg} {new_path}")
+
+
+def test_environment(env: Env):
+    commands = [
+        "hisat2-build",
+        "bedtools",
+        "fastqc",
+        "hisat2",
+        "samtools",
+        "rnaspades",
+        "kraken2",
+        "seqtk",
+        "makeblastdb",
+        "blastn",
+        "centrifuge"
+    ]
+    for command in commands:
+        error_code, output_msg, errors = execute([
+            command
+        ],
+            show_output=False)
+        if error_code == 2:
+            log.error(f"{command} - FAILED: The program was not found")
+        else:
+            log.info(f"{command} - PASSED")
+
+
 def reset_progress(env: Env):
-    if confirm("Would you like to remove the downloaded bam files?"):
+    if not env.start > 1:
+        log.info("Removing BAM files")
         try:
             os.remove(os.path.join(env.bam_files_dir, f"{env.uuid}.bam"))
         except FileNotFoundError:
             pass
         except Exception as err:
             log.error(err)
-    if confirm(f"Would you like to remove the processed files (this will delete the folder '{env.base_dir}')?"):
-        error_code, output, errors = execute(
-            ["rm", "-rvf", f"{env.base_dir}"], show_output=False)
+    else:
+        log.info("Skipping BAM files removal")
+
+    if not env.start > 2:
+        log.info("Removing BAM->FASTQ files")
+        for f in [
+            os.path.join(env.fastq_dir, f"{env.uuid}_F1.fq"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_F2.fq")
+        ]:
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+            except Exception as err:
+                log.error(err)
+    else:
+        log.info("Skipping BAM->FASTQ converted files")
+
+    if not env.start > 3:
+        log.info("Removing FASTQ quality check files")
+        for f in [
+            os.path.join(env.fastq_dir, f"{env.uuid}_F1_fastqc.html"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_F1_fastqc.zip"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_F2_fastqc.html"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_F2_fastqc.zip"),
+        ]:
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+            except Exception as err:
+                log.error(err)
+    else:
+        log.info("Skipping FASTQ quality check files")
+
+    if not env.start > 4:
+        log.info("Removing trimmed fastq files")
+        for f in [
+            os.path.join(env.fastq_dir, f"{env.uuid}_trimmed_F1.fq"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_trimmed_F1_fastqc.html"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_trimmed_F1_fastqc.zip"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_trimmed_F1_UP.fq"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_trimmed_F2.fq"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_trimmed_F2_fastqc.html"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_trimmed_F2_fastqc.zip"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_trimmed_F2_UP.fq"),
+        ]:
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+            except Exception as err:
+                log.error(err)
+    else:
+        log.info("Skipping trimmed fastq files")
+
+    if not env.start > 5:
+        log.info("Removing Hisat alignment files")
+        for f in [
+            os.path.join(env.fastq_dir, f"{env.uuid}_trimmed_sam"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_host_aligned.bam"),
+        ]:
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+            except Exception as err:
+                log.error(err)
+    else:
+        log.info("Skipping Hisat alignment files")
+
+    if not env.start > 6:
+        log.info("Removing extracted / non-human reads files")
+        for f in [
+            os.path.join(env.fastq_dir, f"{env.uuid}_unmapped.bam"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_unmapped_sorted.bam"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_unmapped_F1.fq"),
+            os.path.join(env.fastq_dir, f"{env.uuid}_unmapped_F2.fq"),
+        ]:
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+            except Exception as err:
+                log.error(err)
+    else:
+        log.info("Skipping extracted / non-humn reads files")
+
+    if not env.start > 7:
+        log.info("Removing assembly of unmapped files")
+        execute(
+            [
+                "rm",
+                "-rvf",
+                env.spades_output_dir
+            ]
+        )
+    else:
+        log.info("Skipping assembly of unmapped files")
+
+    if not env.start > 8:
+        log.info("Removing Kraken classification files")
+        for f in [
+            os.path.join(env.kraken_output_dir,
+                         f"{env.uuid}_kraken_report.txt"),
+            os.path.join(env.kraken_output_dir,
+                         f"{env.uuid}_kraken_classifications.txt"),
+            os.path.join(env.kraken_output_dir,
+                         f"{env.uuid}_kraken_output.txt"),
+        ]:
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+            except Exception as err:
+                log.error(err)
+    else:
+        log.info("Skipping Kraken classification files")
+
+    if not env.start > 9:
+        log.info("Removing Kraken pathogen nodes files")
+        for f in [
+            os.path.join(env.kraken_output_dir,
+                         f"{env.uuid}_pathogen_nodes.txt"),
+        ]:
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+            except Exception as err:
+                log.error(err)
+    else:
+        log.info("Skipping Kraken pathogen nodes files")
+
+    if not env.start > 10:
+        log.info("Removing Kraken pathogen nodes files")
+        for f in [
+            os.path.join(env.kraken_output_dir,
+                         f"{env.uuid}_pathogen_sequences.fasta"),
+        ]:
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+            except Exception as err:
+                log.error(err)
+    else:
+        log.info("Skipping Kraken classification files")
+
+    if not env.start > 11:
+        log.info("Removing Blastn DB files")
+        try:
+            execute([
+                "rm",
+                "-rvf",
+                os.path.join(env.blastn_output_dir, f"{env.uuid}/blastndb")
+            ])
+        except:
+            pass
+    else:
+        log.info("Skipping blastn DB files")
+
+    if not env.start > 12:
+        log.info("Removing Blastn query files")
+        for f in [
+            os.path.join(env.kraken_output_dir,
+                         f"{env.uuid}_pathogen_gene_annotation.blastn"),
+        ]:
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+            except Exception as err:
+                log.error(err)
+    else:
+        log.info("Skipping Blastn query files")
+
+    if not env.start > 13:
+        log.info("Removing Centrifuge classification files")
+        for f in [
+            os.path.join(env.centrifuge_output_dir,
+                         f"{env.uuid}_centrifuge_report.txt"),
+            os.path.join(env.centrifuge_output_dir,
+                         f"{env.uuid}_tax_id_list.txt"),
+            os.path.join(env.centrifuge_output_dir,
+                         f"{env.uuid}_centrifuge_output.txt"),
+            os.path.join(env.centrifuge_output_dir,
+                         f"{env.uuid}_pathogen_nodes.txt"),
+            os.path.join(env.centrifuge_output_dir,
+                         f"{env.uuid}_pathogen_sequences.fasta"),
+        ]:
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+            except Exception as err:
+                log.error(err)
+    else:
+        log.info("Skipping Centrifuge classification files")
+
     log.info(f"Complete")
 
 
@@ -716,17 +1301,17 @@ def parse_arguments():
     parser.add_argument('--reset', action="store_true",
                         help="Resets progress (except dowloading BAM file) for the UUID specified.")
     parser.add_argument('mode', metavar="MODE", choices=[
-                        'single', 'paired', 'pipeline'], action='store', help="The mode to run, either single, paired or pipeline.")
+                        'single', 'paired', 'pipeline', 'build', 'test'], action='store', help="The mode to run, either single, paired, pipeline, build or test. Build will build the environment. Test will test the environment.")
     parser.add_argument('--uuid', action='store',
-                        required=True, help='The UUID to process.')
-    parser.add_argument('--base_dir', action='store',
-                        required=True, help='The base directory under which all processed files are stored.')
+                        help='The UUID to process.')
+    parser.add_argument('--base-dir', action='store',
+                        help='The base directory under which all processed files are stored.')
     parser.add_argument('--token', metavar="FILE", action='store',
                         help='The file containing the API Key to download BAM files.')
     parser.add_argument('--start', metavar="LEVEL",
                         choices=["1", "2", "3", "4", "5", "6"], action="store", help="Start at a later stage of processing:\n\n1=Beginning, 2=Skip downloading, 3=Skip conversion to fastq (bedtools), 4=Skip quality checking (fastqc), 5=Skip trimming (Trimmomatic), 6=Skip alignment (Hisat2), 7=Skip extraction (samtools and bedtools), 8=Skip assembly (SPAdes), 9=Skiup Kraken2 classification, 10=Skip pathogen extraction, 11=Skip Blastn db creation, 12=Skip Blastn DB query, 13=Skip Blastn query DB, 14=Skip Centrifuge classification, 15=Skip Blastn classification")
     parser.add_argument('--bam-files-dir', metavar="DIRECTORY",
-                        required=True, action='store', help="Specify the bam files directory.")
+                        action='store', help="Specify the bam files directory.")
     parser.add_argument('--trimmomatic-jar', metavar="FILE",
                         action='store', help="Specify the Trimmomatic jar file.")
     parser.add_argument('--hisat-db-dir', metavar="FILE",
@@ -741,6 +1326,8 @@ def parse_arguments():
                         action="store", help="Specify the pathogen of interest.")
     parser.add_argument('--debug', action="store_true",
                         help="Enable debug logging")
+    parser.add_argument('--skip-quality', action="store_true",
+                        help="Skips all quality checking using fastq")
 
     try:
         args = parser.parse_args()
@@ -755,6 +1342,7 @@ def main():
     if args.debug:
         logger.set_level(logging.DEBUG)
         log.debug("Debug logging enabled")
+        build = args.build
 
     env = Env(
         args.mode,
@@ -769,20 +1357,24 @@ def main():
         args.centrifuge_db_dir,
         args.token,
         start=args.start if args.start else 1,
-        reset=args.reset if args.reset else False
+        reset=args.reset if args.reset else False,
+        skip_quality=args.skip_quality if args.skip_quality else False
     )
 
+    if env.mode == 'test':
+        test_environment(env)
+        sys.exit(0)
+
+    if env.mode == 'build':
+        build_environment(env)
+        sys.exit(0)
+
     if env.reset:
-        log.warning(f"Resetting all progress for UUID {env.uuid}")
         reset_progress(env)
         sys.exit(0)
 
     if not env.validate():
         sys.exit(-1)
-
-    log.debug(f"BAM_FILES_DIR={env.bam_files_dir}")
-    log.debug(f"FASTQC_DIR={env.fastq_dir}")
-    log.debug(f"TRIMMOMATIC_JAR_FILE={env.trimmomatic_jar}")
 
     log.info(f"##### Running in {env.mode} mode #####")
     if env.mode == 'single':
@@ -790,7 +1382,7 @@ def main():
     elif env.mode == 'paired':
         paired(env)
     elif env.mode == 'pipeline':
-        piepline(env)
+        pipeline(env)
 
 
 if __name__ in ['__main__', 'builtin', '__builtins__']:
