@@ -13,10 +13,12 @@ from beaupy.spinners import Spinner, DOTS, ARC
 import zipfile
 import gzip
 import tarfile
+from io import TextIOWrapper
+import multiprocessing
 
 
 class Env():
-    def __init__(self, mode: str, uuid: str, base_dir: str, bam_files_dir: str, trimmomatic_jar: str, hisat_db_dir: str, splice_sites_file: str, kraken_db_dir: str, pathogen: str, centrifuge_db_dir: str, token_file: str, start: int = 1, reset: bool = False, skip_quality: bool = False):
+    def __init__(self, mode: str, uuid: str, base_dir: str, bam_files_dir: str, trimmomatic_jar: str, hisat_db_dir: str, splice_sites_file: str, kraken_db_dir: str, human_genome_lib: str, pathogen: str, centrifuge_db_dir: str, token_file: str, start: int = 1, reset: bool = False, skip_quality: bool = False):
         self.mode: str = mode
         self.uuid: str = uuid
         if base_dir:
@@ -40,12 +42,14 @@ class Env():
         self.hisat_db_dir: str = hisat_db_dir
         self.splice_sites_file: str = splice_sites_file
         self.kraken_db_dir: str = kraken_db_dir
+        self.human_genome_lib: str = human_genome_lib
         self.pathogen: str = pathogen
         self.skip_quality: bool = skip_quality
         self.token_file: str = token_file
         self.token: str = ""
         self.reset: bool = reset
         self.__bam_exists__: bool = False
+        self.cpu_count: int = 1
 
     def validate(self) -> bool:
         success = True
@@ -62,12 +66,8 @@ class Env():
                 "You must provide the file location to the Trimmomatic jar file (--trimmomatic-jar)"},
             {self.centrifuge_db_dir:
                 "You must provide a directory that contains the centrifuge database (--centrifuge-db-dir)"},
-            {self.hisat_db_dir:
-                "You must provide a directory that contains the Hisat database files (--hisat-db-dir)"},
             {self.kraken_db_dir:
                 "You must provide a directory that contains the kraken2 database files (--kraken-db-dir)"},
-            {self.splice_sites_file:
-                "You must provide the file that contains splice sites information (--splice-sites-file)"},
             {self.token_file:
                 "You must provide the file that contains the token for use with downloading BAM files (--token)"}
         ]
@@ -76,6 +76,9 @@ class Env():
                 if not c:
                     success = False
                     log.error(v)
+        if not self.hisat_db_dir and not self.human_genome_lib:
+            success = False
+            log.error("You must provide at least one of a hisat DB directory (--hisat-db-dir), or a human genome library (--human-genome). Human genome wins if both are provided.")
         if not success:
             return success
 
@@ -110,7 +113,7 @@ class Env():
                 log.error(
                     f"The directory ({self.hisat_db_dir}) does not exist")
 
-        if not os.path.exists(self.splice_sites_file):
+        if self.splice_sites_file and not os.path.exists(self.splice_sites_file):
             success = False
             log.warning(
                 f"The file ({self.splice_sites_file}) does not exist")
@@ -176,7 +179,7 @@ class Env():
             "775",
             filedir
         ])
-        console.print(
+        print(
             "Please select the Centrifuge database to download and extract:")
         choices = {
             "Refseq: bacteria, archaea, viral, human (compressed)": "https://genome-idx.s3.amazonaws.com/centrifuge/p_compressed%2Bh%2Bv.tar.gz",
@@ -209,7 +212,7 @@ class Env():
             "775",
             filedir
         ])
-        console.print(
+        print(
             "Please select the Kraken database to download and extract:")
         choices = {
             "Standard (55GB)": "https://genome-idx.s3.amazonaws.com/kraken/k2_standard_20240112.tar.gz",
@@ -250,7 +253,7 @@ class Env():
         choices = {
             "Genome sequence (GRCh38.p14)": "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_45/GRCh38.p14.genome.fa.gz"
         }
-        console.print(
+        print(
             "Please select the Hisat database to download and extract:")
         choice = select(list(choices.keys()))
         if choice:
@@ -289,7 +292,7 @@ class Env():
             "775",
             filedir
         ])
-        console.print(
+        print(
             "Please select the GRHc GTF files to use to create the splicesites file:")
         choices = {
             "EBI - Comprehensive - CHR": "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_45/gencode.v45.annotation.gtf.gz",
@@ -322,7 +325,7 @@ class Env():
             extr = Spinner(DOTS, "Extracting sites information...")
             extr.start()
             with open(gtf_file, 'r') as f:
-                for line in f:
+                for line in tqdm(f):
                     if not line.startswith('#'):
                         fields = line.strip().split('\t')
                         if fields[2] == 'exon':
@@ -343,6 +346,44 @@ class Env():
                         f_out.write('\t'.join(map(str, splice_site)) + '\n')
             extr.stop()
         return final_tsv, []
+
+    def create_human_genome(self, filedir):
+        gunzip_file = os.path.join(filedir, "library.fna.gz")
+        library_file = os.path.join(filedir, "library.fna")
+        choices = {
+            "NCBI - GRCh38 latest": "https://ftp.ncbi.nlm.nih.gov/refseq/H_sapiens/annotation/GRCh38_latest/refseq_identifiers/GRCh38_latest_rna.fna.gz",
+        }
+        if not os.path.exists(filedir):
+            os.makedirs(filedir, exist_ok=True)
+        error_code, output_msg, errors = execute([
+            "chmod",
+            "-R",
+            "775",
+            filedir
+        ])
+
+        print(
+            "Please select the Human genome file to use:")
+        choice = select(list(choices.keys()))
+        if choice:
+            url = choices[choice]
+
+            download_file(url, gunzip_file, os.path.basename(
+                gunzip_file), keep=False)
+
+            extr = Spinner(DOTS, "Extracting library...")
+            extr.start()
+            with gzip.open(gunzip_file, 'rb') as f_in:
+                with open(gunzip_file.replace(".gz", ""), 'wb') as f_out:
+                    f_out.write(f_in.read())
+            try:
+                os.remove(gunzip_file)
+            except:
+                pass
+            extr.stop()
+        return library_file, [f"bwa index {library_file}"]
+
+        pass
 
 
 class Logger():
@@ -376,8 +417,7 @@ def signal_handler(signal, frame):
 def execute(cmd: list, show_output: bool = True) -> tuple:
     first_cmd = cmd[0] if isinstance(
         cmd, list) else cmd if isinstance(cmd, str) else ""
-    working = Spinner(DOTS, f"Executing {first_cmd}")
-    working.start()
+    log.info(f"Executing: {' '.join(cmd)}")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, universal_newlines=True)
     if show_output:
@@ -387,7 +427,6 @@ def execute(cmd: list, show_output: bool = True) -> tuple:
     proc.stdout.close()
     return_code = proc.wait()
     output_msg, error_msg = proc.communicate()
-    working.stop()
     return return_code, output_msg, error_msg
 
 
@@ -404,569 +443,1100 @@ def download_file(url: str, filepath: str, filename: str, params: dict = {}, hea
                 file.write(data)
 
 
+def add_to_output(fp: TextIOWrapper, command: str, header: str = "", echo: str = "", complete_msg: list = [], supress_outpout: bool = False):
+    if header:
+        fp.write(f"\n### {header} ###\n")
+    if echo:
+        s = ""
+        for x in range(0, len(echo) + 8):
+            s = f"{s}#"
+        fp.write('echo ""\n')
+        fp.write(f'echo "{s}"\n')
+        fp.write(f'echo "### {echo} ###"\n')
+        fp.write(f'echo "{s}"\n')
+    fp.write(command)
+    if supress_outpout:
+        fp.write("  > /dev/null 2>&1")
+    fp.write("\n")
+    if complete_msg:
+        for msg in complete_msg:
+            fp.write(f'echo "{msg}"\n')
+
+
+def download_bam_files(env: Env):
+    log.info('### Downloading bam files ###')
+    if not os.path.exists(env.token_file):
+        log.error(f"The token file ({env.token_file}) does not exist")
+        sys.exit(-1)
+    if not env.token:
+        log.error(f"No token could be extracted from {env.token_file}")
+        sys.exit(-1)
+    url = f"https://api.gdc.cancer.gov/data/{env.uuid}"
+    headers = {
+        "X-Auth-Token": env.token
+    }
+    filepath = os.path.join(env.bam_files_dir, f"{env.uuid}.bam")
+    download_file(url, filepath, f"{env.uuid}.bam", headers=headers)
+    log.info('Download complete')
+    log.info(f'Saved BAM file to {filepath}')
+
+
 def single(env: Env):
-    pass
 
+    # Create output file
+    with open("execute.sh", "w") as fp:
 
-def paired(env: Env):
-
-    # Download BAM files
-    if not env.start > 1:
-        log.info('### Downloading bam files ###')
+        # Download BAM files
         if env.__bam_exists__:
             log.warning(
                 f"{env.uuid}.bam already exists, overwriting. To avoid this in the future use --start 2")
-        if not os.path.exists(env.token_file):
-            log.error(f"The token file ({env.token_file}) does not exist")
-            sys.exit(-1)
-        if not env.token:
-            log.error(f"No token could be extracted from {env.token_file}")
-            sys.exit(-1)
         url = f"https://api.gdc.cancer.gov/data/{env.uuid}"
-        headers = {
-            "X-Auth-Token": env.token
-        }
-        filepath = os.path.join(env.bam_files_dir, f"{env.uuid}.bam")
-        download_file(url, filepath, f"{env.uuid}.bam", headers=headers)
-        log.info('Download complete')
-        log.info(f'Saved BAM file to {filepath}')
-    else:
-        log.info("Skipping download")
+        add_to_output(
+            fp,
+            f'curl -J -H "X-Auth-Token: {env.token}" -o "{env.bam_files_dir}/{env.uuid}.bam" {url}',
+            header="Download BAM files",
+            echo="Downloading BAM files",
+            complete_msg=[
+                f"BAM file saved to {env.bam_files_dir}/{env.uuid}.bam"
+            ]
+        )
 
-    # Convert BAM files
-    uuid_f1 = f"{env.fastq_dir}/{env.uuid}_F1.fq"
-    uuid_f2 = f"{env.fastq_dir}/{env.uuid}_F2.fq"
-    if not env.start > 2:
+        # Convert BAM files
+        uuid_f1 = f"{env.fastq_dir}/{env.uuid}.fq"
         log.info(f'### Converting {env.uuid}.bam file to FASTA format ###')
         bam_source = os.path.join(env.bam_files_dir, f"{env.uuid}.bam")
 
         if os.path.exists(os.path.join(env.fastq_dir, f"{env.uuid}_F1.fq")) and os.path.exists(os.path.join(env.fastq_dir, f"{env.uuid}_F2.fq")):
             log.warning(
                 f"{env.fastq_dir}/{env.uuid}_F1.fq already exists, overwriting. To avoid this in the future use --start 3")
-            log.warning(
-                f"{env.fastq_dir}/{env.uuid}_F2.fq already exists, overwriting. To avoid this in the future use --start 3")
-        error_code, output, errors = execute([
-            "bedtools",
-            "bamtofastq",
-            "-i",
-            bam_source,
-            "-fq",
-            uuid_f1,
-            "-fq2",
-            uuid_f2
-        ])
-        log.info(f'Saved fastq file to {uuid_f1}')
-        log.info(f'Saved fastq file to {uuid_f2}')
-        if errors:
-            log.error(errors)
-            sys.exit(-1)
 
-        log.info(f"Conversion complete for {env.uuid}.bam")
-    else:
-        log.info("Skipping BAM -> FASTA conversion")
+        add_to_output(
+            fp,
+            f"bedtools bamtofastq -i {bam_source} -fq {uuid_f1}",
+            header="Convert BAM to FASTQ",
+            echo=f"Converting {env.uuid}.bam to FASTQ",
+            complete_msg=[
+                f'echo "Saved fastq file to {uuid_f1}"'
+            ]
+        )
 
-    # Check quality
-    if not env.start > 3:
+        # Check quality
         if not env.skip_quality:
-            log.info(f"### Checking quality of F*.fq files ###")
-            error_code, output, errors = execute([
-                "fastqc",
-                uuid_f1,
-                "--outdir",
-                env.fastq_dir
-            ])
-            if error_code != 0:
-                log.error(errors)
-                sys.exit(-1)
-            error_code, output, errors = execute([
-                "fastqc",
-                uuid_f2,
-                "--outdir",
-                env.fastq_dir
-            ])
-            if error_code != 0:
-                log.error(errors)
-                sys.exit(-1)
-            log.info("Quality check complete")
+            add_to_output(
+                fp,
+                f"fastqc {uuid_f1} --outdir {env.fastq_dir}",
+                header="Quality check with FASTQ",
+                echo=f"Checking quality of {os.path.basename(uuid_f1)} with FASTQ"
+            )
         else:
             log.info("Skipping quality check due to --skip-quality")
-    else:
-        log.info("Skipping fastqc quality check")
 
-    #  Trimming
-    trimmed_f1 = f"{env.fastq_dir}/{env.uuid}_trimmed_F1.fq"
-    trimmed_f1_up = f"{env.fastq_dir}/{env.uuid}_trimmed_F1_UP.fq"
-    trimmed_f2 = f"{env.fastq_dir}/{env.uuid}_trimmed_F2.fq"
-    trimmed_f2_up = f"{env.fastq_dir}/{env.uuid}_trimmed_F2_UP.fq"
-    if not env.start > 4:
-        log.info(f"### Trimming files with Trimmomatic ###")
-        error_code, output, errors = execute(
-            ["java",
-             "-jar",
-             env.trimmomatic_jar,
-             "PE",
-             uuid_f1,
-             uuid_f2,
-             trimmed_f1,
-             trimmed_f1_up,
-             trimmed_f2,
-             trimmed_f2_up,
-             "LEADING:28",
-             "TRAILING:28",
-             "SLIDINGWINDOW:4:28",
-             "MINLEN:28"
-             ])
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info("Trimming complete")
-        log.info(f'Saved fastq file to {trimmed_f1}')
-        log.info(f'Saved fastq file to {trimmed_f1_up}')
-        log.info(f'Saved fastq file to {trimmed_f2}')
-        log.info(f'Saved fastq file to {trimmed_f2_up}')
+        # Trimming
+        trimmed_f1 = f"{env.fastq_dir}/{env.uuid}_trimmed.fq"
+        add_to_output(
+            fp,
+            f"java -jar {env.trimmomatic_jar} SE {uuid_f1} {trimmed_f1} -threads {env.cpu_count} LEADING:28 TRAILING:28 SLIDINGWINDOW:4:28 MINLEN:28",
+            header="Trimming files with Trimmomatic",
+            echo="Trimming files with Trimmomatic",
+            complete_msg=[
+                f"Saved fastq file to {trimmed_f1}"
+            ]
+        )
 
         if not env.skip_quality:
-            log.info("### Checking quality with fastq ###")
-            error_code, output_msg, errors = execute([
-                "fastqc",
-                trimmed_f1,
-                "--outdir",
-                f"{env.fastq_dir}"
-            ])
-            if error_code != 0:
-                log.error(errors)
-                sys.exit(-1)
-
-            error_code, output_msg, errors = execute([
-                "fastqc",
-                trimmed_f2,
-                "--outdir",
-                f"{env.fastq_dir}"
-            ])
-            if error_code != 0:
-                log.error(errors)
-                sys.exit(-1)
-            log.info("Quality check complete")
+            add_to_output(
+                fp,
+                f"fastqc {trimmed_f1} --outdir {env.fastq_dir}",
+                header=f"Quality check {trimmed_f1} with FASTQ",
+                echo=f"Checking quality of {os.path.basename(trimmed_f1)} with FASTQ"
+            )
         else:
             log.info("Skipping quality check due to --skip-quality")
-    else:
-        log.info("Skipping trimming with Trimmomatic")
 
-    #  Hisat
-    trimmed_sam = f"{env.fastq_dir}/{env.uuid}_trimmed_sam.sam"
-    trimmed_sam_compresssed = f"{env.fastq_dir}/{env.uuid}_trimmed_sam.sam.bz"
-    host_aligned = f"{env.fastq_dir}/{env.uuid}_host_aligned.bam"
-    if not env.start > 5:
-        log.info(f"### Running Hisat and alignment ###")
-        error_code, output_msg, errors = execute([
-            "hisat2",
-            "-x",
-            f"{env.hisat_db_dir}/genome",
-            "--known-splicesite-infile",
-            env.splice_sites_file,
-            "-1",
-            trimmed_f1,
-            "-2",
-            trimmed_f2,
-            "-S",
-            trimmed_sam
-        ], show_output=False)
+        # Hisat or bwa
+        trimmed_sam = f"{env.fastq_dir}/{env.uuid}_trimmed_sam.sam"
+        host_aligned = f"{env.fastq_dir}/{env.uuid}_host_aligned.bam"
+        use_bwa = False
 
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info(f"Hisat completed")
-        log.info(f'Saved file to {trimmed_sam}')
+        if env.human_genome_lib and env.hisat_db_dir:
+            print("You have specified both hisat directories and bwa directories. Which tool would you like to use for alignment (default: bwa)?")
+            selection = select(["bwa", "hisat"])
+            if selection:
+                if selection == "bwa":
+                    use_bwa = True
+                else:
+                    use_bwa = False
+            else:
+                use_bwa = True
+        else:
+            if env.human_genome_lib:
+                use_bwa = True
+            else:
+                use_bwa = False
 
-        log.info(f"Compressing sam file")
-        error_code, output_msg, errors = execute([
-            "samtools",
-            "view",
-            "-h",
-            "-o",
-            trimmed_sam_compresssed,
-            trimmed_sam
-        ])
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info(f"Compressing complete")
-        log.info(f'Saved file to {trimmed_sam_compresssed}')
+        # BWA
+        if use_bwa:
+            command = f"bwa mem -t {env.cpu_count} {env.human_genome_lib} {trimmed_f1} -o {trimmed_sam}"
 
-        log.info(f"Converting to bam file")
-        error_code, output_msg, errors = execute([
-            "samtools",
-            "view",
-            "-bS",
-            "-o",
-            host_aligned,
-            trimmed_sam_compresssed
-        ])
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info('Samtools complete')
-        log.info(f'Saved file to {host_aligned}')
+            add_to_output(
+                fp,
+                command,
+                header="Run BWA and alignment",
+                echo="Running BWA and alignment",
+                complete_msg=[
+                    f"Saved file to {trimmed_sam}"
+                ]
+            )
 
-    else:
-        log.info("Skipping Hisat alignment")
+            add_to_output(
+                fp,
+                f"samtools sort -o {host_aligned} {trimmed_sam}",
+                header="Converting to bam file",
+                echo=f"Converting {os.path.basename(trimmed_sam)} to bam file",
+                complete_msg=[
+                    f"Saved file to {host_aligned}"
+                ]
+            )
 
-    # Extract unmapped reads
-    unmapped_bam = f"{env.fastq_dir}/{env.uuid}_unmapped.bam"
-    unmapped_sorted = f"{env.fastq_dir}/{env.uuid}_unmapped_sorted.bam"
-    unmapped_f1 = f"{env.fastq_dir}/{env.uuid}_unmapped_F1.fq"
-    unmapped_f2 = f"{env.fastq_dir}/{env.uuid}_unmapped_F2.fq"
-    if not env.start > 6:
+        # Hisat
+        else:
+            command = f"hisat2 -x {env.hisat_db_dir}/genome"
+            if env.splice_sites_file:
+                command = f"{command} --known-splicesite-infile {env.splice_sites_file}"
+            command = f"{command} -U {trimmed_f1} -S {trimmed_sam}"
 
-        log.info("### Extracting unmapped / non-human reads ###")
-        error_code, output_msg, errors = execute([
-            "samtools",
-            "view",
-            "-F",
-            "4",
-            host_aligned,
-            "-o",
-            unmapped_bam
-        ])
+            add_to_output(
+                fp,
+                command,
+                header="Running Hisat and alignment",
+                echo="Running Hisat and alignment",
+                complete_msg=[
+                    f"Saved file to {trimmed_sam}"
+                ]
+            )
 
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info('Extraction complete')
-        log.info(f'Saved file to {unmapped_bam}')
+            add_to_output(
+                fp,
+                f"samtools view -bS -o {host_aligned} {trimmed_sam}",
+                header="Converting to bam file",
+                echo=f"Converting {os.path.basename(trimmed_sam)} to bam file",
+                complete_msg=[
+                    f"Saved file to {host_aligned}"
+                ]
+            )
 
-        log.info("Sorting results")
-        error_code, output_msg, errors = execute([
-            "samtools",
-            "sort",
-            unmapped_bam,
-            "-o",
-            unmapped_sorted
-        ])
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info("Sorting complete")
-        log.info(f'Saved file to {unmapped_sorted}')
+        # Extract unmapped reads
+        unmapped_bam = f"{env.fastq_dir}/{env.uuid}_unmapped.bam"
+        unmapped_sorted = f"{env.fastq_dir}/{env.uuid}_unmapped_sorted.bam"
+        unmapped_sorted_fastq = f"{env.fastq_dir}/{env.uuid}_unmapped_sorted.fq"
 
-        log.info("Converting results to fastq")
-        error_code, output_msg, errors = execute([
-            "bedtools",
-            "bamtofastq",
-            "-i",
-            unmapped_sorted,
-            "-fq",
-            unmapped_f1,
-            "-fq2",
-            unmapped_f2
-        ])
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info('Conversion complete')
-        log.info(f'Saved fastq file to {unmapped_f1}')
-        log.info(f'Saved fastq file to {unmapped_f2}')
-    else:
-        log.info("Skipping extraction")
+        add_to_output(
+            fp,
+            f"samtools view -F 4 {host_aligned} -o {unmapped_bam}",
+            header="Extracting unmapped / non-human reads",
+            echo="Extracting unmapped / non-human reads",
+            complete_msg=[
+                f"Saved file to {unmapped_bam}"
+            ]
+        )
 
-    if not env.start > 7:
-        log.info("### Running assembly of unmapped reads using SPAdes ###")
+        add_to_output(
+            fp,
+            f"samtools sort {unmapped_bam} -o {unmapped_sorted}",
+            header="Sorting results",
+            echo="Sorting results",
+            complete_msg=[
+                f"Saved file to {unmapped_sorted}"
+            ]
+        )
 
-        error_code, output_msg, errors = execute([
-            "rnaspades",
-            "-1",
-            unmapped_f1,
-            "-2",
-            unmapped_f2,
-            "--only-assembler",
-            "-o",
-            env.spades_output_dir
-        ])
+        add_to_output(
+            fp,
+            f"bedtools bamtofastq -i {unmapped_sorted} -fq {unmapped_sorted_fastq}",
+            header="Converting results to fastq",
+            echo="Converting results to fastq",
+            complete_msg=[
+                f"Saved file to {unmapped_sorted_fastq}"
+            ]
+        )
 
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info('Assembly complete')
-    else:
-        log.info("Skipping assembly with SPAdes")
+        # SPAdes assembly
+        add_to_output(
+            fp,
+            f"spades -s {unmapped_sorted_fastq} --only-assembler -o {env.spades_output_dir}",
+            header="SPAdes assembly",
+            echo="Running assembly of unmapped reads using SPAdes",
+            complete_msg=[
+                "Assembly complete"
+            ]
+        )
 
-    kraken_report = f"{env.kraken_output_dir}/{env.uuid}_kraken_report.txt"
-    kraken_classifications = f"{env.kraken_output_dir}/{env.uuid}_kraken_classifications.txt"
-    kraken_output = f"{env.kraken_output_dir}/{env.uuid}_output_kraken.txt"
-    spades_transcripts = f"{env.spades_output_dir}/{env.uuid}/transcripts.fasta"
-    kraken_pathogen_nodes = f"{env.kraken_output_dir}/{env.uuid}_pathogen_nodes.txt"
-    kraken_pathogen_transcripts = f"{env.kraken_output_dir}/{env.uuid}_pathogen_sequences.fasta"
-    if not env.start > 8:
-        log.info("### Running Kraken2 classification ###")
+        #  Kraken classification
+        kraken_report = f"{env.kraken_output_dir}/{env.uuid}_kraken_report.txt"
+        kraken_classifications = f"{env.kraken_output_dir}/{env.uuid}_kraken_classifications.txt"
+        kraken_output = f"{env.kraken_output_dir}/{env.uuid}_output_kraken.txt"
+        spades_transcripts = f"{env.spades_output_dir}/{env.uuid}/transcripts.fasta"
 
-        error_code, output_msg, errors = execute([
-            "kraken2",
-            "--use-names",
-            "--db",
-            env.kraken_db_dir,
-            "--report",
-            kraken_report,
-            "--classified-out",
-            kraken_classifications,
-            "--output",
-            kraken_output,
-            spades_transcripts
-        ])
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info('Kraken2 classification complete')
-        log.info(
-            f'Saved Kraken classifications file to {kraken_classifications}')
-        log.info(f'Saved Kraken output file to {kraken_output}')
-    else:
-        log.info("Skipping Kraken2 classification")
+        add_to_output(
+            fp,
+            f"kraken2 --use-names --db {env.kraken_db_dir} --report {kraken_report} --classified-out {kraken_classifications} --output {kraken_output} {spades_transcripts}",
+            header="Kraken classification",
+            echo="Running Kraken classification",
+            complete_msg=[
+                f"Saved Kraken classifications file to {kraken_classifications}"
+            ]
+        )
 
-    # Pathogen extraction
-    if not env.start > 9:
+        # Pathogen extraction
+        kraken_pathogen_nodes = f"{env.kraken_output_dir}/{env.uuid}_pathogen_nodes.txt"
+
+        if env.pathogen:
+            command = f"grep -e {env.pathogen} {kraken_output} | awk '%REPLACE%' > {kraken_pathogen_nodes}".replace(
+                "%REPLACE%", "{print $2}")
+        else:
+            command = f"cat {kraken_output} | awk '%REPLACE%' > {kraken_pathogen_nodes}".replace(
+                "%REPLACE%", "{print $2}")
         log.info("### Starting pathogen extraction ###")
 
-        if env.pathogen:
-            error_code, output_msg, errors = execute([
-                "grep",
-                "-e",
-                f"'{env.pathogen}'",
-                kraken_output,
-                "|",
-                "awk",
-                "'{print $2}'",
-                ">",
-                kraken_pathogen_nodes
-            ])
-        else:
-            error_code, output_msg, errors = execute([
-                "cat",
-                kraken_output,
-                "|",
-                "awk",
-                "'{print $2}'",
-                ">",
-                kraken_pathogen_nodes
-            ])
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info('Pathogen extraction complete complete')
-        log.info(f'Saved pathogen nodes file to {kraken_pathogen_nodes}')
-    else:
-        log.info("Skipping pathogen extraction")
+        add_to_output(
+            fp,
+            command,
+            header="Pathogen extraction",
+            echo="Starting pathogen extraction",
+            complete_msg=[
+                "Pathogen extraction complete complete",
+                f"Saved pathogen nodes file to {kraken_pathogen_nodes}"
+            ]
+        )
 
-    if not env.start > 10:
-        log.info('### Sequencing pathogens ###')
-        error_code, output_msg, errors = execute([
-            "seqtk",
-            "subseq",
-            spades_transcripts,
-            kraken_pathogen_nodes,
-            ">",
-            kraken_pathogen_transcripts
-        ])
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info('Sequencing complete')
-        log.info(
-            f'Saved pathogen transcripts file to {kraken_pathogen_transcripts}')
-    else:
-        log.info("Skipping pathogen sequencing")
+        # Sequence pathogens
+        kraken_pathogen_transcripts = f"{env.kraken_output_dir}/{env.uuid}_pathogen_sequences.fasta"
+        add_to_output(
+            fp,
+            f"seqtk subseq {spades_transcripts} {kraken_pathogen_nodes} > {kraken_pathogen_transcripts}",
+            header="Sequencing pathogens",
+            echo="Sequencing pathogens",
+            complete_msg=[
+                "Sequencing complete",
+                f"Saved pathogen transcripts file to {kraken_pathogen_transcripts}"
+            ]
+        )
 
-    # Blastn DB creation
-    blastn_db = f"{env.blastn_output_dir}/{env.uuid}/blastndb"
-    kraken_pathogen_gene = f"{env.kraken_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn"
-    if not env.start > 11:
-        log.info("### Creating Blastn DB ###")
+        # Blastn DB creation
+        blastn_db = f"{env.blastn_output_dir}/{env.uuid}/blastndb"
+        os.makedirs(
+            os.path.join(
+                env.blastn_output_dir,
+                env.uuid
+            ),
+            exist_ok=True
+        )
+        blastn_db = f"{env.blastn_output_dir}/{env.uuid}/blastndb"
+        kraken_pathogen_gene = f"{env.kraken_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn"
+        add_to_output(
+            fp,
+            f"makeblastdb -in {kraken_pathogen_transcripts} -dbtype nucl -out {blastn_db}",
+            header="Create Blastn DB",
+            echo="Creating Blastn DB",
+            complete_msg=[
+                "Blastn DB build complete",
+                f"Saved Blastn DB to {blastn_db}"
+            ]
+        )
 
-        os.makedirs(os.path.join(env.blastn_output_dir,
-                                 env.uuid), exists_ok=True)
-        error_code, output_msg, errors = execute([
-            "makeblastdb",
-            "-in",
-            kraken_pathogen_transcripts,
-            "-dbtype",
-            "nucl",
-            "-out",
-            blastn_db
-        ])
+        # Blastn DB query
+        kraken_pathogen_gene = f"{env.kraken_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn"
+        add_to_output(
+            fp,
+            f"blastn -query {kraken_pathogen_transcripts} -db {blastn_db} -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle' -max_target_seqs 1 -max_hsps 1 -out {kraken_pathogen_gene}",
+            header="Blastn query",
+            echo="Starting Blastn query",
+            complete_msg=[
+                "Blastm DB query complete",
+                f"Saved kraken pathogen gene file to {kraken_pathogen_gene}"
+            ]
+        )
 
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info('DB build complete')
-        log.info(f'Saved Blastn DB to {blastn_db}')
-    else:
-        log.info("Skipping Blastn DB build")
+        # Centrifuge classification
+        centrifuge_report = f"{env.centrifuge_output_dir}/{env.uuid}_centrifuge_report.txt",
+        tax_id_list = f"{env.centrifuge_output_dir}/{env.uuid}_tax_id_list.txt"
+        centrifuge_output = f"{env.centrifuge_output_dir}/{env.uuid}_centrifuge_output.txt"
+        centrifuge_pathogen_nodes = f"{env.centrifuge_output_dir}/{env.uuid}_pathogen_nodes.txt"
+        centrifuge_seq_fasta = f"{env.centrifuge_output_dir}/{env.uuid}_pathogen_sequences.fasta"
+        centrifuge_compressed = f"{env.centrifuge_db_dir}/p_compressed+h+v"
 
-    # Blastn DB query
-    if not env.start > 12:
-        log.info("### Starting Blastn query ###")
-
-        error_code, output_msg, errors = execute([
-            "blastn",
-            "-query",
-            kraken_pathogen_transcripts,
-            "-db",
-            blastn_db,
-            "-outfmt",
-            "'6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle'",
-            "-max_target_seqs",
-            "1",
-            "-max_hsps",
-            "1",
-            "-out",
-            kraken_pathogen_gene
-        ])
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info('DB query complete')
-        log.info(f'Saved kraken pathogen gene file to {kraken_pathogen_gene}')
-    else:
-        log.info("Skipping Blastn query")
-
-    centrifuge_report = f"{env.centrifuge_output_dir}/{env.uuid}_centrifuge_report.txt",
-    tax_id_list = f"{env.centrifuge_output_dir}/{env.uuid}_tax_id_list.txt"
-    centrifuge_output = f"{env.centrifuge_output_dir}/{env.uuid}_centrifuge_output.txt"
-    centrifuge_pathogen_nodes = f"{env.centrifuge_output_dir}/{env.uuid}_pathogen_nodes.txt"
-    centrifuge_seq_fasta = f"{env.centrifuge_output_dir}/{env.uuid}_pathogen_sequences.fasta"
-    centrifuge_compressed = f"{env.centrifuge_db_dir}/p_compressed+h+v"
-    if not env.start > 13:
-        log.info("### Running Centrifuge classification ###")
-
-        error_code, output_msg, errors = execute([
-            "centrifuge",
-            "-x",
-            centrifuge_compressed,
-            "-f",
-            spades_transcripts,
-            "--report-file",
-            centrifuge_report,
-            "-S",
-            centrifuge_output
-        ])
-
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-
-        log.info('### Extracting pathogens ###')
-        log.info(f'Saved Centrifuge report to {centrifuge_report}')
+        add_to_output(
+            fp,
+            f"centrifuge -x {centrifuge_compressed} -f {spades_transcripts} --report-file {centrifuge_report} -S {centrifuge_output}",
+            header="Centrifuge classification",
+            echo="Running Centrifuge classification",
+            complete_msg=[
+                "Classifications complete",
+                f"Saved Centrifuge report to {centrifuge_report}"
+            ]
+        )
 
         if env.pathogen:
-            error_code, output_msg, errors = execute([
-                "grep",
-                "-e",
-                f"'{env.pathogen}'",
-                centrifuge_report,
-                "|",
-                "awk",
-                "'{print $3}'",
-                "|",
-                "sort",
-                "|",
-                "uniq",
-                ">",
-                tax_id_list
-            ])
+            command = f"grep -e '{env.pathogen}' {centrifuge_report} | awk '%REPLACE%' | sort | uniq > {tax_id_list}".replace(
+                "%REPLACE%", "{print $3}")
         else:
-            error_code, output_msg, errors = execute([
-                "cat",
-                centrifuge_report,
-                "|",
-                "awk",
-                "'{print $3}'",
-                "|",
-                "sort",
-                "|",
-                "uniq",
-                ">",
-                tax_id_list
-            ])
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info('Pathogen extraction complete complete')
-        log.info(f'Saved tax ID file to {tax_id_list}')
+            command = f"cat {centrifuge_report} | awk '%REPLACE%' |  sort | uniq > {tax_id_list}".replace(
+                "%REPLACE%", "{print $3}")
+        add_to_output(
+            fp,
+            command,
+            header="Extract pathogens",
+            echo="Extracting pathogens",
+            complete_msg=[
+                f"Saved tax ID file to {tax_id_list}"
+            ]
+        )
 
-        log.info('### Running seqtk and blastn ###')
-        error_code, output_msg, errors = execute([
-            "awk",
-            "-F' '",
-            "'NR==FNR{c[$1]++;next};c[$3]'",
-            tax_id_list,
-            centrifuge_output,
-            "|",
-            "awk",
-            "'{print $1}'",
-            "|",
-            "sort",
-            "-u",
-            "|",
-            "uniq",
-            ">",
-            centrifuge_pathogen_nodes
-        ])
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info(
-            f'Saved Centrifuge pathogen nodes to {centrifuge_pathogen_nodes}')
+        add_to_output(
+            fp,
+            f"awk -F' ' 'NR==FNR%REPLACE1%' {tax_id_list} {centrifuge_output} | awk '%REPLACE2%' | sort -u | uniq > {centrifuge_pathogen_nodes}".replace(
+                "%REPLACE1%", "{c[$1]++;next};c[$3]").replace("%REPLACE2%", "{print $1}"),
+            header="Run seqtk and blastn",
+            echo="Running seqtk and blastn",
+            complete_msg=[
+                f"Saved Centrifuge pathogen nodes to {centrifuge_pathogen_nodes}"
+            ]
+        )
 
-        error_code, output_msg, errors = execute([
-            "seqtk",
-            "subseq",
-            spades_transcripts,
-            centrifuge_pathogen_nodes,
-            ">",
-            centrifuge_seq_fasta
-        ])
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info(
-            f'Saved Centrifuge sequenced fasta file to {centrifuge_seq_fasta}')
+        add_to_output(
+            fp,
+            f"seqtk subseq {spades_transcripts} {centrifuge_pathogen_nodes} > {centrifuge_seq_fasta}",
+            header="Run seqtk and blastn",
+            echo="Running seqtk and blastn",
+            complete_msg=[
+                f"Saved Centrifuge sequenced fasta file to {centrifuge_seq_fasta}"
+            ]
+        )
 
-        error_code, output_msg, errors = execute([
-            "blastn",
-            "-query",
-            centrifuge_seq_fasta,
-            "-db",
-            f"{env.blastn_db_dir}/{env.uuid}_blastndb",
-            "-outfmt",
-            "'6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle'",
-            "-max_target_seqs",
-            "1",
-            "-max_hsps",
-            "1",
-            "-out",
-            f"{env.centrifuge_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn"
-        ])
-        if error_code != 0:
-            log.error(errors)
-            sys.exit(-1)
-        log.info('Seqtk and blastn complete')
-        log.info(
-            f'Saved Centrifuge pathogen gene annotation to {env.centrifuge_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn')
-        log.info('Centrifuge classification complete')
+        add_to_output(
+            fp,
+            f"blastn -query {centrifuge_seq_fasta} -db {env.blastn_output_dir}/{env.uuid}_blastndb -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle' -max_target_seqs 1 -max_hsps 1 -out {env.centrifuge_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn",
+            header="Run seqtk and blastn",
+            echo="Running seqtk and blastn",
+            complete_msg=[
+                f"Saved Centrifuge pathogen gene annotation to {env.centrifuge_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn"
+            ]
+        )
 
-    else:
-        log.info("Skipping Centrifuge classification")
+    log.info("Saved output to execute.sh")
 
-    if not env.start > 14:
-        pass
+
+def paired(env: Env):
+
+    # Create output file
+    with open("execute.sh", "w") as fp:
+
+        # Download BAM files
+        if env.__bam_exists__:
+            log.warning(
+                f"{env.uuid}.bam already exists, overwriting. To avoid this in the future use --start 2")
+        url = f"https://api.gdc.cancer.gov/data/{env.uuid}"
+        add_to_output(
+            fp,
+            f'curl -J -H "X-Auth-Token: {env.token}" -o "{env.bam_files_dir}/{env.uuid}.bam" {url}',
+            header="Download BAM files",
+            echo="Downloading BAM files",
+            complete_msg=[
+                f"BAM file saved to {env.bam_files_dir}/{env.uuid}.bam"
+            ]
+        )
+
+        # Convert BAM files
+        uuid_f1 = f"{env.fastq_dir}/{env.uuid}_F1.fq"
+        uuid_f2 = f"{env.fastq_dir}/{env.uuid}_F2.fq"
+        bam_source = os.path.join(env.bam_files_dir, f"{env.uuid}.bam")
+        bam_aligned_file = os.path.join(env.bam_aligned_dir, f"{env.uuid}.bam")
+
+        if os.path.exists(os.path.join(env.fastq_dir, f"{env.uuid}_F1.fq")) and os.path.exists(os.path.join(env.fastq_dir, f"{env.uuid}_F2.fq")):
+            log.warning(
+                f"{env.fastq_dir}/{env.uuid}_F1.fq already exists, overwriting. To avoid this in the future use --start 3")
+            log.warning(
+                f"{env.fastq_dir}/{env.uuid}_F2.fq already exists, overwriting. To avoid this in the future use --start 3")
+        add_to_output(
+            fp,
+            f"samtools sort -n {bam_source} -o {bam_aligned_file}",
+            header="Sort BAM file",
+            echo=f"Sorting {bam_source} file",
+            complete_msg=[
+                f'echo "Saved sorted BAM file to {bam_aligned_file}"'
+            ]
+        )
+        add_to_output(
+            fp,
+            f"bedtools bamtofastq -i {bam_aligned_file} -fq {uuid_f1} -fq2 {uuid_f2}",
+            header="Convert BAM to FASTQ",
+            echo=f"Converting {env.uuid}.bam to FASTQ",
+            complete_msg=[
+                f'echo "Saved fastq file to {uuid_f1}"',
+                f'echo "Saved fastq file to {uuid_f2}"'
+            ]
+        )
+
+        # Check quality
+        if not env.skip_quality:
+            add_to_output(
+                fp,
+                f"fastqc {uuid_f1} --outdir {env.fastq_dir}",
+                header="Quality check with FASTQ",
+                echo=f"Checking quality of {os.path.basename(uuid_f1)} with FASTQ"
+            )
+            add_to_output(
+                fp,
+                f"fastqc {uuid_f2} --outdir {env.fastq_dir}",
+                header="Quality check with FASTQ",
+                echo=f"Checking quality of {os.path.basename(uuid_f2)} with FASTQ"
+            )
+        else:
+            log.info("Skipping quality check due to --skip-quality")
+
+        # Trimming
+        trimmed_f1 = f"{env.fastq_dir}/{env.uuid}_trimmed_F1.fq"
+        trimmed_f1_up = f"{env.fastq_dir}/{env.uuid}_trimmed_F1_UP.fq"
+        trimmed_f2 = f"{env.fastq_dir}/{env.uuid}_trimmed_F2.fq"
+        trimmed_f2_up = f"{env.fastq_dir}/{env.uuid}_trimmed_F2_UP.fq"
+
+        add_to_output(
+            fp,
+            f"java -jar {env.trimmomatic_jar} PE {uuid_f1} {uuid_f2} {trimmed_f1} {trimmed_f1_up} {trimmed_f2} {trimmed_f2_up} -threads {env.cpu_count} -threads {env.cpu_count} LEADING:28 TRAILING:28 SLIDINGWINDOW:4:28 MINLEN:28",
+            header="Trimming files with Trimmomatic",
+            echo="Trimming files with Trimmomatic",
+            complete_msg=[
+                f"Saved fastq file to {trimmed_f1}",
+                f"Saved fastq file to {trimmed_f1_up}",
+                f"Saved fastq file to {trimmed_f2}",
+                f"Saved fastq file to {trimmed_f2_up}",
+            ]
+        )
+
+        # Quality check
+        if not env.skip_quality:
+            add_to_output(
+                fp,
+                f"fastqc {trimmed_f1} --outdir {env.fastq_dir}",
+                header=f"Quality check {trimmed_f1} with FASTQ",
+                echo=f"Checking quality of {os.path.basename(trimmed_f1)} with FASTQ"
+            )
+            add_to_output(
+                fp,
+                f"fastqc {trimmed_f2} --outdir {env.fastq_dir}",
+                header=f"Quality check {trimmed_f2} with FASTQ",
+                echo=f"Checking quality of {os.path.basename(trimmed_f2)} with FASTQ"
+            )
+        else:
+            log.info("Skipping quality check due to --skip-quality")
+
+        # Hisat or bwa
+        trimmed_sam = f"{env.fastq_dir}/{env.uuid}_trimmed_sam.sam"
+        host_aligned = f"{env.fastq_dir}/{env.uuid}_host_aligned.bam"
+
+        use_bwa = False
+
+        if env.human_genome_lib and env.hisat_db_dir:
+            print("You have specified both hisat directories and bwa directories. Which tool would you like to use for alignment (default: bwa)?")
+            selection = select(["bwa", "hisat"])
+            if selection:
+                if selection == "bwa":
+                    use_bwa = True
+                else:
+                    use_bwa = False
+            else:
+                use_bwa = True
+        else:
+            if env.human_genome_lib:
+                use_bwa = True
+            else:
+                use_bwa = False
+
+        # BWA
+        if use_bwa:
+            trimmed_sam = f"{env.fastq_dir}/{env.uuid}_trimmed_sam.sam"
+            host_aligned = f"{env.fastq_dir}/{env.uuid}_host_aligned.bam"
+
+            command = f"bwa mem -t {env.cpu_count} {env.human_genome_lib} {trimmed_f1} {trimmed_f2} -o {trimmed_sam}"
+
+            add_to_output(
+                fp,
+                command,
+                header="Run BWA and alignment",
+                echo="Running BWA and alignment",
+                complete_msg=[
+                    f"Saved file to {trimmed_sam}"
+                ]
+            )
+
+            add_to_output(
+                fp,
+                f"samtools sort -o {host_aligned} {trimmed_sam}",
+                header="Converting to bam file",
+                echo=f"Converting {os.path.basename(trimmed_sam)} to bam file",
+                complete_msg=[
+                    f"Saved file to {host_aligned}"
+                ]
+            )
+
+        # Hisat
+        else:
+            command = f"hisat2 -x {env.hisat_db_dir}/genome"
+            if env.splice_sites_file:
+                command = f"{command} --known-splicesite-infile {env.splice_sites_file}"
+            command = f"{command} -1 {trimmed_f1} -2 {trimmed_f2} -S {trimmed_sam}"
+            add_to_output(
+                fp,
+                command,
+                header="Running Hisat and alignment",
+                echo="Running Hisat and alignment",
+                complete_msg=[
+                    f"Saved file to {trimmed_sam}"
+                ]
+            )
+            add_to_output(
+                fp,
+                f"samtools view -bS -o {host_aligned} {trimmed_sam}",
+                header="Converting to bam file",
+                echo=f"Converting {os.path.basename(trimmed_sam)} to bam file",
+                complete_msg=[
+                    f"Saved file to {host_aligned}"
+                ]
+            )
+
+        # Extract unmapped reads
+        unmapped_bam = f"{env.fastq_dir}/{env.uuid}_unmapped.bam"
+        unmapped_sorted = f"{env.fastq_dir}/{env.uuid}_unmapped_sorted.bam"
+        unmapped_f1 = f"{env.fastq_dir}/{env.uuid}_unmapped_F1.fq"
+        unmapped_f2 = f"{env.fastq_dir}/{env.uuid}_unmapped_F2.fq"
+
+        add_to_output(
+            fp,
+            f"samtools view -F 4 {host_aligned} -o {unmapped_bam}",
+            header="Extracting unmapped / non-human reads",
+            echo="Extracting unmapped / non-human reads",
+            complete_msg=[
+                f"Saved file to {unmapped_bam}"
+            ]
+        )
+
+        add_to_output(
+            fp,
+            f"samtools sort {unmapped_bam} -o {unmapped_sorted}",
+            header="Sorting results",
+            echo="Sorting results",
+            complete_msg=[
+                f"Saved file to {unmapped_sorted}"
+            ]
+        )
+
+        add_to_output(
+            fp,
+            f"bedtools bamtofastq -i {unmapped_sorted} -fq {unmapped_f1} -fq2 {unmapped_f2}",
+            header="Converting results to fastq",
+            echo="Converting results to fastq",
+            complete_msg=[
+                f"Saved file to {unmapped_f1}",
+                f"Saved file to {unmapped_f2}"
+            ]
+        )
+
+        # SPAdes assembly
+        add_to_output(
+            fp,
+            f"rnaspades -1 {unmapped_f1} -2 {unmapped_f2} --only-assembler -o {env.spades_output_dir}",
+            header="SPAdes assembly",
+            echo="Running assembly of unmapped reads using SPAdes",
+            complete_msg=[
+                "Assembly complete"
+            ]
+        )
+
+        #  Kraken classification
+        kraken_report = f"{env.kraken_output_dir}/{env.uuid}_kraken_report.txt"
+        kraken_classifications = f"{env.kraken_output_dir}/{env.uuid}_kraken_classifications.txt"
+        kraken_output = f"{env.kraken_output_dir}/{env.uuid}_output_kraken.txt"
+        spades_transcripts = f"{env.spades_output_dir}/{env.uuid}/transcripts.fasta"
+        kraken_pathogen_nodes = f"{env.kraken_output_dir}/{env.uuid}_pathogen_nodes.txt"
+        kraken_pathogen_transcripts = f"{env.kraken_output_dir}/{env.uuid}_pathogen_sequences.fasta"
+
+        add_to_output(
+            fp,
+            f"kraken2 --use-names --db {env.kraken_db_dir} --report {kraken_report} --classified-out {kraken_classifications} --output {kraken_output} {spades_transcripts}",
+            header="Kraken classification",
+            echo="Running Kraken classification",
+            complete_msg=[
+                f"Saved Kraken classifications file to {kraken_classifications}"
+            ]
+        )
+
+        # Pathogen extraction
+        if env.pathogen:
+            command = f"grep -e {env.pathogen} {kraken_output} | awk '%REPLACE%' > {kraken_pathogen_nodes}".replace(
+                "%REPLACE%", "{print $2}")
+        else:
+            command = f"cat {kraken_output} | awk '%REPLACE%' > {kraken_pathogen_nodes}".replace(
+                "%REPLACE%", "{print $2}")
+        add_to_output(
+            fp,
+            command,
+            header="Pathogen extraction",
+            echo="Starting pathogen extraction",
+            complete_msg=[
+                "Pathogen extraction complete complete",
+                f"Saved pathogen nodes file to {kraken_pathogen_nodes}"
+            ]
+        )
+
+        # Sequence pathogens
+        add_to_output(
+            fp,
+            f"seqtk subseq {spades_transcripts} {kraken_pathogen_nodes} > {kraken_pathogen_transcripts}",
+            header="Sequencing pathogens",
+            echo="Sequencing pathogens",
+            complete_msg=[
+                "Sequencing complete",
+                f"Saved pathogen transcripts file to {kraken_pathogen_transcripts}"
+            ]
+        )
+
+        # Blastn DB creation
+        os.makedirs(
+            os.path.join(
+                env.blastn_output_dir,
+                env.uuid
+            ),
+            exist_ok=True
+        )
+        blastn_db = f"{env.blastn_output_dir}/{env.uuid}/blastndb"
+        kraken_pathogen_gene = f"{env.kraken_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn"
+        add_to_output(
+            fp,
+            f"makeblastdb -in {kraken_pathogen_transcripts} -dbtype nucl -out {blastn_db}",
+            header="Create Blastn DB",
+            echo="Creating Blastn DB",
+            complete_msg=[
+                "Blastn DB build complete",
+                f"Saved Blastn DB to {blastn_db}"
+            ]
+        )
+
+        # Blastn DB query
+
+        add_to_output(
+            fp,
+            f"blastn -query {kraken_pathogen_transcripts} -db {blastn_db} -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle' -max_target_seqs 1 -max_hsps 1 -out {kraken_pathogen_gene}",
+            header="Blastn query",
+            echo="Starting Blastn query",
+            complete_msg=[
+                "Blastm DB query complete",
+                f"Saved kraken pathogen gene file to {kraken_pathogen_gene}"
+            ]
+        )
+
+        # Centrifuge classification
+        centrifuge_report = f"{env.centrifuge_output_dir}/{env.uuid}_centrifuge_report.txt"
+        tax_id_list = f"{env.centrifuge_output_dir}/{env.uuid}_tax_id_list.txt"
+        centrifuge_output = f"{env.centrifuge_output_dir}/{env.uuid}_centrifuge_output.txt"
+        centrifuge_pathogen_nodes = f"{env.centrifuge_output_dir}/{env.uuid}_pathogen_nodes.txt"
+        centrifuge_seq_fasta = f"{env.centrifuge_output_dir}/{env.uuid}_pathogen_sequences.fasta"
+        centrifuge_compressed = f"{env.centrifuge_db_dir}/p_compressed+h+v"
+
+        add_to_output(
+            fp,
+            f"centrifuge -x {centrifuge_compressed} -f {spades_transcripts} --report-file {centrifuge_report} -S {centrifuge_output}",
+            header="Centrifuge classification",
+            echo="Running Centrifuge classification",
+            complete_msg=[
+                "Classifications complete",
+                f"Saved Centrifuge report to {centrifuge_report}"
+            ]
+        )
+
+        if env.pathogen:
+            command = f"grep -e '{env.pathogen}' {centrifuge_report} | awk '%REPLACE%' | sort | uniq > {tax_id_list}".replace(
+                "%REPLACE%", "{print $3}")
+        else:
+            command = f"cat {centrifuge_report} | awk '%REPLACE%' |  sort | uniq > {tax_id_list}".replace(
+                "%REPLACE%", "{print $3}")
+        add_to_output(
+            fp,
+            command,
+            header="Extract pathogens",
+            echo="Extracting pathogens",
+            complete_msg=[
+                f"Saved tax ID file to {tax_id_list}"
+            ]
+        )
+
+        add_to_output(
+            fp,
+            f"awk -F' ' 'NR==FNR%REPLACE1%' {tax_id_list} {centrifuge_output} | awk '%REPLACE2%' | sort -u | uniq > {centrifuge_pathogen_nodes}".replace(
+                "%REPLACE1%", "{c[$1]++;next};c[$3]").replace("%REPLACE2%", "{print $1}"),
+            header="Run seqtk and blastn",
+            echo="Running seqtk and blastn",
+            complete_msg=[
+                f"Saved Centrifuge pathogen nodes to {centrifuge_pathogen_nodes}"
+            ]
+        )
+
+        add_to_output(
+            fp,
+            f"seqtk subseq {spades_transcripts} {centrifuge_pathogen_nodes} > {centrifuge_seq_fasta}",
+            header="Run seqtk and blastn",
+            echo="Running seqtk and blastn",
+            complete_msg=[
+                f"Saved Centrifuge sequenced fasta file to {centrifuge_seq_fasta}"
+            ]
+        )
+
+        add_to_output(
+            fp,
+            f"blastn -query {centrifuge_seq_fasta} -db {env.blastn_output_dir}/{env.uuid}_blastndb -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle' -max_target_seqs 1 -max_hsps 1 -out {env.centrifuge_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn",
+            header="Run seqtk and blastn",
+            echo="Running seqtk and blastn",
+            complete_msg=[
+                f"Saved Centrifuge pathogen gene annotation to {env.centrifuge_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn"
+            ]
+        )
+
+    log.info("Saved output to execute.sh")
 
 
 def pipeline(env: Env):
-    pass
+
+    return
+
+    # Create output file
+    with open("execute.sh", "w") as fp:
+
+        # Download BAM files
+        if env.__bam_exists__:
+            log.warning(
+                f"{env.uuid}.bam already exists, overwriting. To avoid this in the future use --start 2")
+        url = f"https://api.gdc.cancer.gov/data/{env.uuid}"
+        add_to_output(
+            fp,
+            f'curl -J -H "X-Auth-Token: {env.token}" -o "{env.bam_files_dir}/{env.uuid}.bam" {url}',
+            header="Download BAM files",
+            echo="Downloading BAM files",
+            complete_msg=[
+                f"BAM file saved to {env.bam_files_dir}/{env.uuid}.bam"
+            ]
+        )
+
+        # Convert BAM files
+        uuid_f1 = f"{env.fastq_dir}/{env.uuid}_F1.fq.gz"
+        uuid_f2 = f"{env.fastq_dir}/{env.uuid}_F2.fq.gz"
+        uuid_s = f"{env.fastq_dir}/{env.uuid}_s.fq.gz"
+        uuid_0 = f"{env.fastq_dir}/{env.uuid}_0.fq.gz"
+        uuid_02 = f"{env.fastq_dir}/{env.uuid}_02.fq.gz"
+        bam_source = os.path.join(env.bam_files_dir, f"{env.uuid}.bam")
+        bam_aligned_file = os.path.join(env.bam_aligned_dir, f"{env.uuid}.bam")
+
+        if os.path.exists(os.path.join(env.fastq_dir, f"{env.uuid}_F1.fq")) and os.path.exists(os.path.join(env.fastq_dir, f"{env.uuid}_F2.fq")):
+            log.warning(
+                f"{env.fastq_dir}/{env.uuid}_F1.fq already exists, overwriting. To avoid this in the future use --start 3")
+            log.warning(
+                f"{env.fastq_dir}/{env.uuid}_F2.fq already exists, overwriting. To avoid this in the future use --start 3")
+        add_to_output(
+            fp,
+            f"samtools sort -n {bam_source} -o {bam_aligned_file}",
+            header="Sort BAM file",
+            echo=f"Sorting {bam_source} file",
+            complete_msg=[
+                f'echo "Saved sorted BAM file to {bam_aligned_file}"'
+            ]
+        )
+        add_to_output(
+            fp,
+            f"bamtofastq collate=1 exclude=QCFAIL,SECONDARY,SUPPLEMENTARY filename={bam_aligned_file} F={uuid_f1} F2={uuid_f2} S={uuid_s} inputformat=bam 0={uuid_0} 02={uuid_02} tryoq=1 gz=1 level=5",
+            header="Convert BAM to FASTQ",
+            echo=f"Converting {env.uuid}.bam to FASTQ",
+            complete_msg=[
+                f'echo "Saved fastq file to {uuid_f1}"',
+                f'echo "Saved fastq file to {uuid_f2}"'
+            ]
+        )
+
+        # Check quality
+        if not env.skip_quality:
+            add_to_output(
+                fp,
+                f"fastqc {uuid_f1} --outdir {env.fastq_dir}",
+                header="Quality check with FASTQ",
+                echo=f"Checking quality of {os.path.basename(uuid_f1)} with FASTQ"
+            )
+            add_to_output(
+                fp,
+                f"fastqc {uuid_f2} --outdir {env.fastq_dir}",
+                header="Quality check with FASTQ",
+                echo=f"Checking quality of {os.path.basename(uuid_f2)} with FASTQ"
+            )
+        else:
+            log.info("Skipping quality check due to --skip-quality")
+
+        # Trimming
+        trimmed_f1 = f"{env.fastq_dir}/{env.uuid}_trimmed_F1.fq"
+        trimmed_f1_up = f"{env.fastq_dir}/{env.uuid}_trimmed_F1_UP.fq"
+        trimmed_f2 = f"{env.fastq_dir}/{env.uuid}_trimmed_F2.fq"
+        trimmed_f2_up = f"{env.fastq_dir}/{env.uuid}_trimmed_F2_UP.fq"
+
+        add_to_output(
+            fp,
+            f"java -jar {env.trimmomatic_jar} PE {uuid_f1} {uuid_f2} {trimmed_f1} {trimmed_f1_up} {trimmed_f2} {trimmed_f2_up} -threads {env.cpu_count} LEADING:28 TRAILING:28 SLIDINGWINDOW:4:28 MINLEN:28",
+            header="Trimming files with Trimmomatic",
+            echo="Trimming files with Trimmomatic",
+            complete_msg=[
+                f"Saved fastq file to {trimmed_f1}",
+                f"Saved fastq file to {trimmed_f1_up}",
+                f"Saved fastq file to {trimmed_f2}",
+                f"Saved fastq file to {trimmed_f2_up}",
+            ]
+        )
+
+        # Quality check
+        if not env.skip_quality:
+            add_to_output(
+                fp,
+                f"fastqc {trimmed_f1} --outdir {env.fastq_dir}",
+                header=f"Quality check {trimmed_f1} with FASTQ",
+                echo=f"Checking quality of {os.path.basename(trimmed_f1)} with FASTQ"
+            )
+            add_to_output(
+                fp,
+                f"fastqc {trimmed_f2} --outdir {env.fastq_dir}",
+                header=f"Quality check {trimmed_f2} with FASTQ",
+                echo=f"Checking quality of {os.path.basename(trimmed_f2)} with FASTQ"
+            )
+        else:
+            log.info("Skipping quality check due to --skip-quality")
+
+        # Align to combined reference genome
+        trimmed_sam = f"{env.fastq_dir}/{env.uuid}_trimmed_sam.sam"
+        host_aligned = f"{env.fastq_dir}/{env.uuid}_host_aligned.bam"
+        command = f"bwa mem {env.kraken_db_dir} -x {env.hisat_db_dir}/genome"
+        add_to_output(
+            fp,
+            command,
+            header="Running Hisat and alignment",
+            echo="Running Hisat and alignment",
+            complete_msg=[
+                f"Saved file to {trimmed_sam}"
+            ]
+        )
+        add_to_output(
+            fp,
+            f"samtools view -bS -o {host_aligned} {trimmed_sam}",
+            header="Converting to bam file",
+            echo=f"Converting {os.path.basename(trimmed_sam)} to bam file",
+            complete_msg=[
+                f"Saved file to {host_aligned}"
+            ]
+        )
+
+        # Extract unmapped reads
+        unmapped_bam = f"{env.fastq_dir}/{env.uuid}_unmapped.bam"
+        unmapped_sorted = f"{env.fastq_dir}/{env.uuid}_unmapped_sorted.bam"
+        unmapped_f1 = f"{env.fastq_dir}/{env.uuid}_unmapped_F1.fq"
+        unmapped_f2 = f"{env.fastq_dir}/{env.uuid}_unmapped_F2.fq"
+
+        add_to_output(
+            fp,
+            f"samtools view -F 4 {host_aligned} -o {unmapped_bam}",
+            header="Extracting unmapped / non-human reads",
+            echo="Extracting unmapped / non-human reads",
+            complete_msg=[
+                f"Saved file to {unmapped_bam}"
+            ]
+        )
+
+        add_to_output(
+            fp,
+            f"samtools sort {unmapped_bam} -o {unmapped_sorted}",
+            header="Sorting results",
+            echo="Sorting results",
+            complete_msg=[
+                f"Saved file to {unmapped_sorted}"
+            ]
+        )
+
+        add_to_output(
+            fp,
+            f"bedtools bamtofastq -i {unmapped_sorted} -fq {unmapped_f1} -fq2 {unmapped_f2}",
+            header="Converting results to fastq",
+            echo="Converting results to fastq",
+            complete_msg=[
+                f"Saved file to {unmapped_f1}",
+                f"Saved file to {unmapped_f2}"
+            ]
+        )
+
+        # SPAdes assembly
+        add_to_output(
+            fp,
+            f"rnaspades -1 {unmapped_f1} -2 {unmapped_f2} --only-assembler -o {env.spades_output_dir}",
+            header="SPAdes assembly",
+            echo="Running assembly of unmapped reads using SPAdes",
+            complete_msg=[
+                "Assembly complete"
+            ]
+        )
+
+        #  Kraken classification
+        kraken_report = f"{env.kraken_output_dir}/{env.uuid}_kraken_report.txt"
+        kraken_classifications = f"{env.kraken_output_dir}/{env.uuid}_kraken_classifications.txt"
+        kraken_output = f"{env.kraken_output_dir}/{env.uuid}_output_kraken.txt"
+        spades_transcripts = f"{env.spades_output_dir}/{env.uuid}/transcripts.fasta"
+        kraken_pathogen_nodes = f"{env.kraken_output_dir}/{env.uuid}_pathogen_nodes.txt"
+        kraken_pathogen_transcripts = f"{env.kraken_output_dir}/{env.uuid}_pathogen_sequences.fasta"
+
+        add_to_output(
+            fp,
+            f"kraken2 --use-names --db {env.kraken_db_dir} --report {kraken_report} --classified-out {kraken_classifications} --output {kraken_output} {spades_transcripts}",
+            header="Kraken classification",
+            echo="Running Kraken classification",
+            complete_msg=[
+                f"Saved Kraken classifications file to {kraken_classifications}"
+            ]
+        )
+
+        # Pathogen extraction
+        if env.pathogen:
+            command = f"grep -e {env.pathogen} {kraken_output} | awk '%REPLACE%' > {kraken_pathogen_nodes}".replace(
+                "%REPLACE%", "{print $2}")
+        else:
+            command = f"cat {kraken_output} | awk '%REPLACE%' > {kraken_pathogen_nodes}".replace(
+                "%REPLACE%", "{print $2}")
+        add_to_output(
+            fp,
+            command,
+            header="Pathogen extraction",
+            echo="Starting pathogen extraction",
+            complete_msg=[
+                "Pathogen extraction complete complete",
+                f"Saved pathogen nodes file to {kraken_pathogen_nodes}"
+            ]
+        )
+
+        # Sequence pathogens
+        add_to_output(
+            fp,
+            f"seqtk subseq {spades_transcripts} {kraken_pathogen_nodes} > {kraken_pathogen_transcripts}",
+            header="Sequencing pathogens",
+            echo="Sequencing pathogens",
+            complete_msg=[
+                "Sequencing complete",
+                f"Saved pathogen transcripts file to {kraken_pathogen_transcripts}"
+            ]
+        )
+
+        # Blastn DB creation
+        os.makedirs(
+            os.path.join(
+                env.blastn_output_dir,
+                env.uuid
+            ),
+            exist_ok=True
+        )
+        blastn_db = f"{env.blastn_output_dir}/{env.uuid}/blastndb"
+        kraken_pathogen_gene = f"{env.kraken_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn"
+        add_to_output(
+            fp,
+            f"makeblastdb -in {kraken_pathogen_transcripts} -dbtype nucl -out {blastn_db}",
+            header="Create Blastn DB",
+            echo="Creating Blastn DB",
+            complete_msg=[
+                "Blastn DB build complete",
+                f"Saved Blastn DB to {blastn_db}"
+            ]
+        )
+
+        # Blastn DB query
+
+        add_to_output(
+            fp,
+            f"blastn -query {kraken_pathogen_transcripts} -db {blastn_db} -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle' -max_target_seqs 1 -max_hsps 1 -out {kraken_pathogen_gene}",
+            header="Blastn query",
+            echo="Starting Blastn query",
+            complete_msg=[
+                "Blastm DB query complete",
+                f"Saved kraken pathogen gene file to {kraken_pathogen_gene}"
+            ]
+        )
+
+        # Centrifuge classification
+        centrifuge_report = f"{env.centrifuge_output_dir}/{env.uuid}_centrifuge_report.txt"
+        tax_id_list = f"{env.centrifuge_output_dir}/{env.uuid}_tax_id_list.txt"
+        centrifuge_output = f"{env.centrifuge_output_dir}/{env.uuid}_centrifuge_output.txt"
+        centrifuge_pathogen_nodes = f"{env.centrifuge_output_dir}/{env.uuid}_pathogen_nodes.txt"
+        centrifuge_seq_fasta = f"{env.centrifuge_output_dir}/{env.uuid}_pathogen_sequences.fasta"
+        centrifuge_compressed = f"{env.centrifuge_db_dir}/p_compressed+h+v"
+
+        add_to_output(
+            fp,
+            f"centrifuge -x {centrifuge_compressed} -f {spades_transcripts} --report-file {centrifuge_report} -S {centrifuge_output}",
+            header="Centrifuge classification",
+            echo="Running Centrifuge classification",
+            complete_msg=[
+                "Classifications complete",
+                f"Saved Centrifuge report to {centrifuge_report}"
+            ]
+        )
+
+        if env.pathogen:
+            command = f"grep -e '{env.pathogen}' {centrifuge_report} | awk '%REPLACE%' | sort | uniq > {tax_id_list}".replace(
+                "%REPLACE%", "{print $3}")
+        else:
+            command = f"cat {centrifuge_report} | awk '%REPLACE%' |  sort | uniq > {tax_id_list}".replace(
+                "%REPLACE%", "{print $3}")
+        add_to_output(
+            fp,
+            command,
+            header="Extract pathogens",
+            echo="Extracting pathogens",
+            complete_msg=[
+                f"Saved tax ID file to {tax_id_list}"
+            ]
+        )
+
+        add_to_output(
+            fp,
+            f"awk -F' ' 'NR==FNR%REPLACE1%' {tax_id_list} {centrifuge_output} | awk '%REPLACE2%' | sort -u | uniq > {centrifuge_pathogen_nodes}".replace(
+                "%REPLACE1%", "{c[$1]++;next};c[$3]").replace("%REPLACE2%", "{print $1}"),
+            header="Run seqtk and blastn",
+            echo="Running seqtk and blastn",
+            complete_msg=[
+                f"Saved Centrifuge pathogen nodes to {centrifuge_pathogen_nodes}"
+            ]
+        )
+
+        add_to_output(
+            fp,
+            f"seqtk subseq {spades_transcripts} {centrifuge_pathogen_nodes} > {centrifuge_seq_fasta}",
+            header="Run seqtk and blastn",
+            echo="Running seqtk and blastn",
+            complete_msg=[
+                f"Saved Centrifuge sequenced fasta file to {centrifuge_seq_fasta}"
+            ]
+        )
+
+        add_to_output(
+            fp,
+            f"blastn -query {centrifuge_seq_fasta} -db {env.blastn_output_dir}/{env.uuid}_blastndb -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle' -max_target_seqs 1 -max_hsps 1 -out {env.centrifuge_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn",
+            header="Run seqtk and blastn",
+            echo="Running seqtk and blastn",
+            complete_msg=[
+                f"Saved Centrifuge pathogen gene annotation to {env.centrifuge_output_dir}/{env.uuid}_pathogen_gene_annotation.blastn"
+            ]
+        )
+
+    log.info("Saved output to execute.sh")
 
 
 def build_environment(env: Env):
     console.clear()
-    console.print("### Environment builder ###")
+    print("### Environment builder ###")
 
     required_directories = {
         "trimmomatic_jar": {
@@ -1001,6 +1571,15 @@ def build_environment(env: Env):
             "desc": "This is required for Hisat processing",
             "arg": "--hisat-db-dir",
             "func": env.create_hisat_db,
+            "complete": False,
+            "new_path": "",
+            "followups": []
+        },
+        "human_genome": {
+            "name": "Human genome reference library",
+            "desc": "This is required for aligning to a reference genome",
+            "arg": "--human-genome",
+            "func": env.create_human_genome,
             "complete": False,
             "new_path": "",
             "followups": []
@@ -1046,8 +1625,8 @@ def build_environment(env: Env):
             for k, v in required_directories.items():
                 if v.get('followups'):
                     [pf.write(f"{x}\n") for x in v.get('followups')]
-        console.print("To complete the build please execute:\n\n./followup.sh")
-    console.print(
+        print("To complete the build please execute:\n\n./followup.sh")
+    print(
         "\n### Complete! ###\n\nEnsure you run any follow up commands (if mentioned above) and then the following file / directories can be used:\n")
     for path, details in required_directories.items():
         name = details.get('name')
@@ -1056,7 +1635,7 @@ def build_environment(env: Env):
         func = details.get('func')
         new_path = details.get('new_path')
         if new_path:
-            console.print(f"{arg} {new_path}")
+            print(f"{arg} {new_path}")
 
 
 def test_environment(env: Env):
@@ -1320,6 +1899,8 @@ def parse_arguments():
                         action='store', help="Specify the splice-sites tsv file.")
     parser.add_argument('--kraken-db-dir', metavar="FILE",
                         action='store', help="Specify the Kraken2 DB directory.")
+    parser.add_argument('--human-genome', metavar="FILE",
+                        action='store', help="Specify the human genome library fna file.")
     parser.add_argument('--centrifuge-db-dir', metavar="FILE",
                         action='store', help="Specify the Centrifuge DB directory.")
     parser.add_argument('--pathogen', metavar="NAME",
@@ -1353,6 +1934,7 @@ def main():
         args.hisat_db_dir,
         args.splice_sites_file,
         args.kraken_db_dir,
+        args.human_genome,
         args.pathogen,
         args.centrifuge_db_dir,
         args.token,
@@ -1360,6 +1942,8 @@ def main():
         reset=args.reset if args.reset else False,
         skip_quality=args.skip_quality if args.skip_quality else False
     )
+    cpu_count = multiprocessing.cpu_count()
+    env.cpu_count = cpu_count
 
     if env.mode == 'test':
         test_environment(env)
