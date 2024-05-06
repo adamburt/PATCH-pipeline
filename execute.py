@@ -1658,7 +1658,7 @@ def build_environment(env: Env):
                  for k, v in required_directories.items() if v.get('followups')]
     console.clear()
     if followups:
-        with open('followup.sh', 'w') as pf:
+        with open('followup.sh', 'a+') as pf:
             for k, v in required_directories.items():
                 if v.get('followups'):
                     [pf.write(f"{x}\n") for x in v.get('followups')]
