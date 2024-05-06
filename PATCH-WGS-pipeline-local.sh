@@ -7,9 +7,9 @@ fi
 uuid=$1
 bam_files_location="/scratch/bam_files"
 output_fastq_files="/scratch/processed_data/fastqc"
-trimmomatic_jar_file="/scratch/prj/cb_microbiome/tools/Trimmomatic-0.39/trimmomatic-0.39.jar"
-human_genome_lib="/scratch/prj/cb_microbiome/databases/kraken/databases/refseq/standard/library/human/library.fna"
-kraken_standard_db="/scratch/prj/cb_microbiome/databases/kraken/databases/refseq/standard/library/human/library.fna"
+trimmomatic_jar_file="/scratch/files/trimmomatic/trimmomatic-0.39.jar"
+human_genome_lib="/scratch/files/human_genome/library.fna"
+kraken_standard_db="/scratch/files/human_genome/library.fna"
 bam_aligned_folder="/scratch/processed_data/bam_aligned"
 spades_output_folder="/scratch/processed_data/spades"
 kraken_directory="/scratch/processed_data/kraken"

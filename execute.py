@@ -463,6 +463,34 @@ def add_to_output(fp: TextIOWrapper, command: str, header: str = "", echo: str =
             fp.write(f'echo "{msg}"\n')
 
 
+def add_setup(fp: TextIOWrapper, env: Env):
+    add_to_output(
+        fp,
+        f"mkdir {env.base_dir}",
+        "Create base directory",
+        "Creating base directory",
+        complete_msg=[],
+        supress_outpout=True
+    )
+    base_dirs = [
+        'bam_aligned',
+        'blastn_output',
+        'centrifuge_output',
+        'fastq_output',
+        'kraken2_output',
+        'spades_output'
+    ]
+    for base_dir in base_dirs:
+        add_to_output(
+            fp,
+            f"mkdir {env.base_dir}/{base_dir}",
+            f"Create {base_dir} directory",
+            f"Creating {base_dir} directory",
+            complete_msg=[f'{base_dir} created successfully'],
+            supress_outpout=True
+        )
+
+
 def download_bam_files(env: Env):
     log.info('### Downloading bam files ###')
     if not os.path.exists(env.token_file):
@@ -485,6 +513,9 @@ def single(env: Env):
 
     # Create output file
     with open("execute.sh", "w") as fp:
+
+        # Base directories
+        add_setup(fp, env)
 
         # Download BAM files
         if env.__bam_exists__:
@@ -831,6 +862,9 @@ def paired(env: Env):
     # Create output file
     with open("execute.sh", "w") as fp:
 
+        # Base directories
+        add_setup(fp, env)
+
         # Download BAM files
         if env.__bam_exists__:
             log.warning(
@@ -863,7 +897,7 @@ def paired(env: Env):
             header="Sort BAM file",
             echo=f"Sorting {bam_source} file",
             complete_msg=[
-                f'echo "Saved sorted BAM file to {bam_aligned_file}"'
+                f"Saved sorted BAM file to {bam_aligned_file}"
             ]
         )
         add_to_output(
@@ -872,8 +906,8 @@ def paired(env: Env):
             header="Convert BAM to FASTQ",
             echo=f"Converting {env.uuid}.bam to FASTQ",
             complete_msg=[
-                f'echo "Saved fastq file to {uuid_f1}"',
-                f'echo "Saved fastq file to {uuid_f2}"'
+                f"Saved fastq file to {uuid_f1}",
+                f"Saved fastq file to {uuid_f2}"
             ]
         )
 
@@ -1209,6 +1243,9 @@ def pipeline(env: Env):
 
     # Create output file
     with open("execute.sh", "w") as fp:
+
+        # Base directories
+        add_setup(fp, env)
 
         # Download BAM files
         if env.__bam_exists__:

@@ -93,7 +93,7 @@ if [ ! -f "${bam_files_location}/${uuid}.bam" ]; then
 
     chmod 775 "${bam_files_location}/${uuid}.bam"
 
-    $send_mail "The file with UUID ${uuid} was downloaded successfully."
+    #$send_mail "The file with UUID ${uuid} was downloaded successfully."
 
     if $only_download; then
         exit 0
@@ -117,7 +117,7 @@ echo "
 echo "Running bam2fq on file ${uuid}.bam"
 bedtools bamtofastq -i ${bam_files_location}/${uuid}.bam -fq ${output_fastq_files}/${uuid}.fq
 
-$send_mail "UUID ${uuid} BAM to FASTQ conversion completed"
+#$send_mail "UUID ${uuid} BAM to FASTQ conversion completed"
 
 #Check quality of fastq file using fastqc
 echo "Checking quality of ${uuid}.fq"
@@ -138,7 +138,7 @@ LEADING:28 TRAILING:28 SLIDINGWINDOW:4:28 MINLEN:28
 
 fastqc ${output_fastq_files}/${uuid}_trimmed.fq --outdir ${output_fastq_files}
 
-$send_mail "Trimming has been completed for ${uuid}"
+#$send_mail "Trimming has been completed for ${uuid}"
 
 echo "
 #################################
@@ -148,7 +148,7 @@ echo "
 #Align to combined reference genome
 hisat2 -x ${grch38_index_folder}/genome --known-splicesite-infile ${splice_sites_file} -p 12 -U ${output_fastq_files}/${uuid}_trimmed.fq -S ${output_fastq_files}/${uuid}_trimmed_sam
 samtools view -bS -o ${output_fastq_files}/${uuid}.hisat.bam ${output_fastq_files}/${uuid}_trimmed_sam
-$send_mail "Hisat alignment has been completed for ${uuid}"
+#$send_mail "Hisat alignment has been completed for ${uuid}"
 
 echo "
 ##############################################################
@@ -159,7 +159,7 @@ echo "
 samtools view -F 4 ${output_fastq_files}/${uuid}.hisat.bam -o ${output_fastq_files}/${uuid}_unmapped.bam
 samtools sort ${output_fastq_files}/${uuid}_unmapped.bam -o ${output_fastq_files}/${uuid}_unmapped_sorted.bam
 bedtools bamtofastq -i ${output_fastq_files}/${uuid}_unmapped_sorted.bam -fq ${output_fastq_files}/${uuid}_unmapped_sorted.fq
-$send_mail "Unmapped extraction, sorting and conversion completed for ${uuid}"
+#$send_mail "Unmapped extraction, sorting and conversion completed for ${uuid}"
 
 
 echo "
