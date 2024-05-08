@@ -1930,15 +1930,15 @@ def parse_arguments():
                         action='store', help="Specify the bam files directory.")
     parser.add_argument('--trimmomatic-jar', metavar="FILE",
                         action='store', help="Specify the Trimmomatic jar file.")
-    parser.add_argument('--hisat-db-dir', metavar="FILE",
+    parser.add_argument('--hisat-db-dir', metavar="DIR",
                         action='store', help="Specify the Hisat DB directory.")
     parser.add_argument('--splice-sites-file', metavar="FILE",
                         action='store', help="Specify the splice-sites tsv file.")
-    parser.add_argument('--kraken-db-dir', metavar="FILE",
+    parser.add_argument('--kraken-db-dir', metavar="DIR",
                         action='store', help="Specify the Kraken2 DB directory.")
     parser.add_argument('--human-genome', metavar="FILE",
                         action='store', help="Specify the human genome library fna file.")
-    parser.add_argument('--centrifuge-db-dir', metavar="FILE",
+    parser.add_argument('--centrifuge-db-dir', metavar="DIR",
                         action='store', help="Specify the Centrifuge DB directory.")
     parser.add_argument('--pathogen', metavar="NAME",
                         action="store", help="Specify the pathogen of interest.")
