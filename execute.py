@@ -227,7 +227,12 @@ class Env():
             download_file(url, gunzip_file, os.path.basename(
                 gunzip_file), keep=False)
 
-            extr = Spinner(DOTS, "Extracting database...")
+            followups = [
+                f"tar -xf {gunzip_file}",
+                f"rm {gunzip_file}"
+            ]
+
+            '''extr = Spinner(DOTS, "Extracting database...")
             extr.start()
             with tarfile.open(gunzip_file, 'r:gz') as tar:
                 tar.extractall(path=os.path.dirname(gunzip_file))
@@ -235,8 +240,8 @@ class Env():
             try:
                 os.remove(gunzip_file)
             except:
-                pass
-        return filedir, []
+                pass'''
+        return filedir, followups
 
     def create_hisat_db(self, filedir):
         gunzip_file = os.path.join(filedir, "genome.fa.gz")
@@ -262,7 +267,7 @@ class Env():
         download_file(url, gunzip_file, os.path.basename(
             gunzip_file), keep=False)
 
-        extr = Spinner(DOTS, "Extracting database...")
+        '''extr = Spinner(DOTS, "Extracting database...")
         extr.start()
         with gzip.open(gunzip_file, 'rb') as f_in:
             with open(gunzip_file.replace(".gz", ""), 'wb') as f_out:
@@ -271,9 +276,10 @@ class Env():
             os.remove(gunzip_file)
         except:
             pass
-        extr.stop()
+        extr.stop()'''
 
         followups = [
+            f"gunzip -d -f {gunzip_file}",
             f"hisat2-build -p 4 {genome_file} {database_file}",
             f"rm {genome_file}"
         ]
